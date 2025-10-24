@@ -6,17 +6,21 @@ Projeto final do curso de **Análise e Desenvolvimento de Sistemas** da **FATEC 
 
 ## 📦 Estrutura do Projeto
 
+
+```
 word-combat/
 ├── server/
-│ ├── index.js
-│ ├── package.json
-│ └── package-lock.json
+│   ├── index.js
+│   ├── package.json
+│   └── package-lock.json
 └── client/
-├── index.html
-├── style.css
-└── js/
-├── game.js
-└── main.js
+    ├── index.html
+    ├── style.css
+    └── js/
+        ├── game.js
+        └── main.js
+```
+
 
 ---
 
