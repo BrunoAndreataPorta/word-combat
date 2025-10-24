@@ -1,0 +1,235 @@
+:root{
+  --cell-size: 40px;
+  --gap: 4px;
+  --bg: #f4f6f8;
+  --card: #ffffff;
+  --muted: #666;
+  --accent: #2b8aef;
+}
+
+*{ box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+  background: linear-gradient(180deg,#eef3fb, #f7fafc);
+  color: #222;
+}
+
+/* header */
+.top{
+  text-align:center;
+  padding: 18px 12px;
+}
+.top h1{
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: 1px;
+}
+.top .subtitle{
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* layout */
+.layout{
+  display:flex;
+  gap: 24px;
+  padding: 20px;
+  align-items:flex-start;
+  justify-content:center;
+}
+
+/* left panel (controls + score + clues) */
+.left{
+  width: 300px;
+}
+.score{
+  font-weight:700;
+  background: var(--card);
+  padding: 12px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+  margin-bottom:12px;
+}
+.btn{
+  display:block;
+  width:100%;
+  padding:10px 12px;
+  margin-bottom:12px;
+  background:var(--accent);
+  color:#fff;
+  border:none;
+  border-radius:8px;
+  cursor:pointer;
+  font-weight:600;
+}
+.clues{
+  margin-top: 12px;
+  background: var(--card);
+  padding: 12px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+  max-height: 520px;
+  overflow:auto;
+}
+.clues h2 { margin: 0 0 8px; font-size:16px; }
+.clues strong { display:block; margin-top:8px; }
+
+/* ===== Estilo dos itens de dica ===== */
+.clues ul {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+
+.clues li {
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.clues li.completed {
+  text-decoration: line-through;
+  color: var(--muted);
+  font-weight: normal;
+}
+
+
+.clues li:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.clues li.active {
+  background-color: #4caf50;
+  color: #fff;
+  font-weight: bold;
+}
+
+/* board area */
+.board{
+  background: transparent;
+  padding: 12px;
+}
+
+/* container grid */
+.grid-container{
+  display: grid;
+  gap: var(--gap);
+  background: #ddd;
+  padding: 12px;
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(12,30,50,0.06);
+}
+
+/* cell container holds input + number */
+.cell-container{
+  position: relative;
+  width: var(--cell-size);
+  height: var(--cell-size);
+}
+
+/* the actual input cell (looks like a square) */
+.cell {
+  width: 100%;
+  height: 100%;
+  border: 1px solid #bbb;
+  background: white;
+  font-size: 18px;
+  font-weight:700;
+  text-transform: uppercase;
+  text-align:center;
+  vertical-align: middle;
+  outline: none;
+  border-radius: 6px;
+  padding: 0;
+}
+
+/* disabled / empty cell */
+.cell:disabled {
+  background: #e9eef6;
+  border: 1px dashed rgba(0,0,0,0.05);
+  color: transparent;
+}
+
+/* highlighted word */
+.cell.highlighted {
+  box-shadow: 0 0 0 3px rgba(43,138,239,0.08) inset;
+  border-color: var(--accent);
+}
+
+/* cell number (small top-left) */
+.cell-number{
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  font-size: 10px;
+  color: #444;
+}
+
+/* feedback colors */
+.cell.correct {
+  background: #d4f8d4 !important;
+}
+.cell.wrong {
+  background: #ffd6d6 !important;
+}
+
+/* pop-up overlay */
+#game-overlay {
+  position: fixed;
+  inset: 0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background: rgba(0,0,0,0.6);
+  z-index: 9999;
+}
+.game-card{
+  background: white;
+  padding: 28px;
+  border-radius: 10px;
+  text-align:center;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.25);
+}
+.game-card h2{ margin: 0 0 8px; }
+.game-card p{ margin: 0 0 16px; color: var(--muted); }
+.game-card .btn { background: #2ecc71; }
+
+@media (max-width:900px){
+  .layout{ flex-direction: column; align-items:center; padding: 12px;}
+  .left{ width: 100%; max-width:540px; }
+}
+
+.cell.correct:disabled {
+  color: #222; /* ou a cor que você quiser */
+  font-weight: bold;
+}
+
+.cell.correct-other:disabled {
+  color: #222;
+  font-weight: bold;
+  opacity: 0.9;
+  background: #4d62db;
+}
+
+
+.timer {
+  font-size: 18px;
+  font-weight: bold;
+  color: #222;
+  background: var(--card);
+  padding: 6px 10px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+}
+
+.timer.warning {
+  color: #e67e22;
+}
+
+.timer.danger {
+  color: #e74c3c;
+}
+

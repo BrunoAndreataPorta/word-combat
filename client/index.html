@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <title>Word Combat — Palavras Cruzadas</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top">
+    <h1>Word Combat</h1>
+    <p class="subtitle">Entre em uma épica batalha para expandir seu vocabulário</p>
+  </header>
+
+  <main class="layout">
+    <aside class="left">
+      <div id="score" class="score">Pontuação: 0</div>
+      <div id="timer" class="timer">⏱️ 03:00</div>
+      <button id="generate-btn" class="btn">Gerar Novas Palavras</button>
+      <div id="clues" class="clues"></div>
+    </aside>
+
+    <section class="board">
+      <div id="grid-container" class="grid-container"></div>
+    </section>
+  </main>
+
+  <script src="js/game.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
