@@ -28,7 +28,7 @@ word-combat/
 
 1. Clone o repositório ou baixe o projeto:
    ```bash
-   git clone <URL_DO_REPOSITORIO>
+   git clone https://github.com/BrunoAndreataPorta/word-combat.git
    cd word-combat/server
    
 2. Instale as dependências:
