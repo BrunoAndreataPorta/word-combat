@@ -4,26 +4,48 @@
   <meta charset="utf-8" />
   <title>Word Combat — Palavras Cruzadas</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
   <header class="top">
     <h1>Word Combat</h1>
     <p class="subtitle">Entre em uma épica batalha para expandir seu vocabulário</p>
+
+    <div class="user-area" aria-hidden="false">
+      <div id="me-name-top" class="me-name">—</div>
+      <button id="btn-profile" class="tiny-btn" type="button">Perfil</button>
+      <button id="btn-logout" class="tiny-btn" type="button">Sair</button>
+    </div>
   </header>
 
   <main class="layout">
     <aside class="left">
-      <div id="score" class="score">Pontuação: 0</div>
+      <div id="score" class="score"><span class="label">Placar</span><span class="value">0</span></div>
       <div id="timer" class="timer">⏱️ 03:00</div>
-      <button id="generate-btn" class="btn">Gerar Novas Palavras</button>
-      <div id="clues" class="clues"></div>
+
+      <div id="clues" class="clues">
+        <h2>Dicas</h2>
+        <ul id="clues-list"></ul>
+      </div>
     </aside>
 
     <section class="board">
-      <div id="grid-container" class="grid-container"></div>
+      <div id="grid-container" class="grid-container" aria-hidden="false"></div>
     </section>
   </main>
+
+  <!-- profile modal -->
+  <div id="profile-modal" class="profile-modal" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="profile-card" role="document">
+      <h3 style="margin-top:0">Perfil</h3>
+      <div style="margin-bottom:8px"><strong>Nome:</strong> <span id="profile-name">—</span></div>
+      <div style="margin-bottom:8px"><strong>Email:</strong> <span id="profile-email">—</span></div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
+        <button id="profile-close" class="btn secondary">Fechar</button>
+        <button id="profile-logout" class="btn">Sair</button>
+      </div>
+    </div>
+  </div>
 
   <script src="js/game.js"></script>
   <script src="/socket.io/socket.io.js"></script>

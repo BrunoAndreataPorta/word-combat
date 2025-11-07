@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <title>Word Combat — Lobby</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="css/ui.css" />
+  <link rel="stylesheet" href="css/lobby.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <div>
+        <h1 class="title">Lobby</h1>
+        <div class="subtitle">Preparar jogadores antes de iniciar a partida</div>
+      </div>
+      <div class="user-block">
+        <div id="me-name" class="me-name">—</div>
+        <button id="btn-profile" class="tiny-btn" type="button">Perfil</button>
+        <button id="btn-logout" class="tiny-btn ghost" type="button">Sair</button>
+      </div>
+    </header>
+
+    <main style="margin-top:14px;">
+      <section class="card">
+        <div class="lobby-header">
+          <div>
+            <strong>Sala:</strong> <span id="room-id">—</span>
+          </div>
+          <div class="controls">
+            <button id="start-btn" class="btn">Iniciar Partida</button>
+            <button id="leave-btn" class="btn secondary">Sair</button>
+          </div>
+        </div>
+
+        <h3>Jogadores na sala</h3>
+        <div id="player-list" class="player-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/lobby.js"></script>
+</body>
+</html>

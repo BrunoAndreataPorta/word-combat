@@ -1,24 +1,160 @@
+require('dotenv').config();
 const express = require("express");
 const http = require("http");
 const path = require("path");
 const { Server } = require("socket.io");
+const bcrypt = require("bcryptjs");
+const mysql = require("mysql2/promise");
+const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 
-// pontuação / tempo
-const POINTS_CORRECT = 10;
-const POINTS_WRONG = -5;
-const DEFAULT_TIMER_SECONDS = 180; // 3 minutos
+// ===== DB pool (mysql2/promise) =====
+const DB_CONFIG = {
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASS || "root",
+  database: process.env.DB_NAME || "wordcombat",
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
+const dbPool = mysql.createPool(DB_CONFIG);
 
+// JWT config
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
+const JWT_EXPIRES = process.env.JWT_EXPIRES || "7d";
+
+// middleware
+app.use(express.json());
+app.use(cookieParser());
+
+// redirect root to auth page
+app.get("/", (req, res) => res.redirect("/auth.html"));
+
+// serve client static files
 app.use(express.static(path.join(__dirname, "..", "client")));
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "..", "client", "index.html"));
+app.get("/hub.html", (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "client", "hub.html"));
+});
+app.get("/lobby.html", (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "client", "lobby.html"));
 });
 
-// ===== CONFIG =====
+// ===== ensure DB + users table exist =====
+async function initDb() {
+  const conn = await dbPool.getConnection();
+  try {
+    // Create DB if not exists, then ensure using it
+    await conn.query(`CREATE DATABASE IF NOT EXISTS \`${DB_CONFIG.database}\`;`);
+    await conn.query(`USE \`${DB_CONFIG.database}\`;`);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(150) NOT NULL,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log("DB initialized and users table ensured.");
+  } finally {
+    conn.release();
+  }
+}
+initDb().catch(err => {
+  console.error("DB init error:", err);
+  // do not crash automatically — but log
+});
+
+// ===== auth helpers (DB) =====
+function signToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+}
+async function findUserByEmail(email) {
+  const [rows] = await dbPool.query("SELECT id, name, email, password_hash FROM users WHERE email = ?", [email]);
+  return rows && rows[0] ? rows[0] : null;
+}
+async function createUser({ name, email, passwordHash }) {
+  const [res] = await dbPool.query("INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)", [name, email, passwordHash]);
+  return { id: res.insertId, name, email };
+}
+
+// ===== auth endpoints =====
+app.post("/api/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body || {};
+    if (!name || !email || !password || typeof password !== "string") {
+      return res.status(400).json({ message: "Campos incompletos." });
+    }
+    if (password.length < 6) return res.status(400).json({ message: "Senha muito curta (mín 6)." });
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const existing = await findUserByEmail(normalizedEmail);
+    if (existing) return res.status(409).json({ message: "Email já cadastrado." });
+
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(password, salt);
+    const user = await createUser({ name: name.trim().slice(0,150), email: normalizedEmail, passwordHash: hash });
+
+    const token = signToken({ id: user.id, name: user.name, email: user.email });
+    // httpOnly cookie
+    res.cookie("wc_token", token, { httpOnly: true, sameSite: "lax" });
+
+    return res.status(201).json({ id: user.id, name: user.name, email: user.email });
+  } catch (err) {
+    console.error("Error /api/register:", err);
+    return res.status(500).json({ message: "Erro interno." });
+  }
+});
+
+app.post("/api/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ message: "Campos incompletos." });
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await findUserByEmail(normalizedEmail);
+    if (!user) return res.status(401).json({ message: "Credenciais inválidas." });
+
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ message: "Credenciais inválidas." });
+
+    const token = signToken({ id: user.id, name: user.name, email: user.email });
+    res.cookie("wc_token", token, { httpOnly: true, sameSite: "lax" }); // add secure:true in prod with HTTPS
+
+    return res.status(200).json({ id: user.id, name: user.name, email: user.email });
+  } catch (err) {
+    console.error("Error /api/login:", err);
+    return res.status(500).json({ message: "Erro interno." });
+  }
+});
+
+app.post("/api/logout", (req, res) => {
+  res.clearCookie("wc_token");
+  return res.json({ ok: true });
+});
+
+app.get("/api/me", async (req, res) => {
+  try {
+    const token = req.cookies && req.cookies.wc_token;
+    if (!token) return res.status(401).json({ message: "Não autorizado." });
+    let payload;
+    try { payload = jwt.verify(token, JWT_SECRET); } catch (e) {
+      return res.status(401).json({ message: "Token inválido." });
+    }
+    return res.json({ id: payload.id, name: payload.name, email: payload.email });
+  } catch (err) {
+    console.error("Error /api/me:", err);
+    return res.status(500).json({ message: "Erro interno." });
+  }
+});
+
+// ===== CONFIG / game helpers (your original logic) =====
 const GRID_SIZE = 15;
 const MIN_WORDS_DEFAULT = 8;
 const MAX_GLOBAL_ATTEMPTS = 50;
@@ -41,6 +177,10 @@ const defaultWordList = [
   { word: "CHUVA", hint: "Água que cai do céu" },
   { word: "CEU", hint: "Fica acima de nós" }
 ];
+
+const POINTS_CORRECT = 10;
+const POINTS_WRONG = -5;
+const DEFAULT_TIMER_SECONDS = 180; // 3 minutos
 
 function coordKey(x, y) { return `${x},${y}`; }
 
@@ -142,72 +282,556 @@ function generateBoard(wordList = defaultWordList, minWords = MIN_WORDS_DEFAULT)
   return { words: finalPlaced.map(p => ({ ...p })) };
 }
 
+// ===== game state (global fallback) =====
 let gameState = {
   board: generateBoard(defaultWordList, MIN_WORDS_DEFAULT),
-  scores: {},
-  endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000
+  scores: {}, // socketId -> points
+  endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000,
+  ended: false
 };
 
 let hostId = null;
 
-// helper para emitir estado completo (board + scores + endTime)
-function emitFullState(targetSocket = null) {
-  const payload = { board: gameState.board, scores: gameState.scores, endTime: gameState.endTime, hostId };
-  if (targetSocket) targetSocket.emit("initState", payload);
-  else io.emit("updateBoard", payload);
+// mapa socketId -> username (pode ser null para guest)
+const players = {};
+
+// ===== Rooms/Salas =====
+const rooms = {}; // roomId -> { name, hostId, hostName, players: { socketId: username }, gameState?, timer?, _deletionTimeout? }
+
+function genRoomId() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let id = "";
+  for (let i = 0; i < 5; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return id;
 }
 
-io.on("connection", (socket) => {
-  console.log("Novo jogador:", socket.id);
+function buildRoomListPayload() {
+  const out = {};
+  for (const [id, r] of Object.entries(rooms)) {
+    out[id] = {
+      name: r.name || null,
+      hostId: r.hostId,
+      hostName: r.hostName || null,
+      players: r.players || {}
+    };
+  }
+  return out;
+}
 
+// ===== Helpers para remoção agendada de salas (grace period) =====
+function scheduleRoomDeletion(roomId, delayMs = 10000) {
+  const room = rooms[roomId];
+  if (!room) return;
+  if (room._deletionTimeout) clearTimeout(room._deletionTimeout);
+  room._deletionTimeout = setTimeout(() => {
+    if (!rooms[roomId]) return;
+    const playersCount = rooms[roomId].players ? Object.keys(rooms[roomId].players).length : 0;
+    if (playersCount === 0) {
+      delete rooms[roomId];
+      console.log(`Sala removida por timeout: ${roomId}`);
+      io.emit("roomList", buildRoomListPayload());
+    } else {
+      console.log(`Sala ${roomId} tinha players ao timeout — não removida.`);
+      cancelRoomDeletion(roomId);
+    }
+  }, delayMs);
+  console.log(`Agendado remoção da sala ${roomId} em ${delayMs}ms`);
+}
+
+function cancelRoomDeletion(roomId) {
+  const room = rooms[roomId];
+  if (!room) return;
+  if (room._deletionTimeout) {
+    clearTimeout(room._deletionTimeout);
+    room._deletionTimeout = null;
+    console.log(`Cancelada remoção agendada da sala ${roomId}`);
+  }
+}
+
+// ===== emit full state helper (global) =====
+function emitFullState(targetSocket = null, eventName = null) {
+  const payload = {
+    board: gameState.board,
+    scores: gameState.scores,
+    endTime: gameState.endTime,
+    hostId,
+    ended: gameState.ended,
+    players // global players map
+  };
+  if (targetSocket) {
+    const ev = eventName || "initState";
+    targetSocket.emit(ev, payload);
+  } else {
+    const ev = eventName || "updateBoard";
+    io.emit(ev, payload);
+  }
+}
+
+// timer (global fallback)
+let _endTimerTimeout = null;
+function scheduleEndTimer() {
+  if (_endTimerTimeout) {
+    clearTimeout(_endTimerTimeout);
+    _endTimerTimeout = null;
+  }
+  const msLeft = Math.max(0, gameState.endTime - Date.now());
+  if (msLeft === 0) {
+    finalizeGame();
+  } else {
+    _endTimerTimeout = setTimeout(() => {
+      finalizeGame();
+    }, msLeft + 50);
+  }
+}
+function finalizeGame() {
+  if (gameState.ended) return;
+  gameState.ended = true;
+  console.log("Tempo do jogo esgotou — finalizando (global).");
+  emitFullState(null, "updateBoard");
+}
+scheduleEndTimer();
+
+function isValidDir(d){ return d === "H" || d === "V"; }
+function toIntSafe(v){ const n = Number(v); return Number.isFinite(n) ? Math.floor(n) : null; }
+
+// ===== socket auth helper (parse cookie header) =====
+function parseCookieHeader(cookieHeader = "") {
+  const cookies = {};
+  cookieHeader.split(";").forEach(part => {
+    const [k, ...v] = part.split("=");
+    const key = (k || "").trim();
+    if (!key) return;
+    cookies[key] = decodeURIComponent((v || []).join("="));
+  });
+  return cookies;
+}
+
+// ===== socket.io connection handling (integrated with cookie/JWT auth) =====
+io.on("connection", (socket) => {
+  console.log("Novo jogador conectado (socket):", socket.id);
+
+  // extract token from handshake cookies
+  const header = socket.handshake && socket.handshake.headers && socket.handshake.headers.cookie;
+  let username = null;
+  if (header) {
+    const cookies = parseCookieHeader(header);
+    const token = cookies.wc_token;
+    if (token) {
+      try {
+        const payload = jwt.verify(token, JWT_SECRET);
+        username = payload.name || null;
+      } catch (e) {
+        // invalid token -> ignore
+      }
+    }
+  }
+
+  if (username) {
+    players[socket.id] = username;
+    console.log("Socket associado a username:", socket.id, "→", username);
+  } else {
+    players[socket.id] = null;
+  }
+
+  // assign host if none
   if (!hostId) hostId = socket.id;
   if (!(socket.id in gameState.scores)) gameState.scores[socket.id] = 0;
 
-  // envia initState somente para esse cliente
-  socket.emit("initState", { board: gameState.board, scores: gameState.scores, endTime: gameState.endTime, hostId });
-  console.log("emit initState para", socket.id);
+  // send initState to this client only (global fallback)
+  emitFullState(socket, "initState");
+  console.log("initState enviado para", socket.id);
 
-  // host pede novo tabuleiro
-  socket.on("requestNewBoard", () => {
-    if (socket.id !== hostId) {
-      console.log("requestNewBoard ignorado de", socket.id, "— não é host", hostId);
+  // broadcast rooms and lobby summary
+  io.emit("roomList", buildRoomListPayload());
+  io.emit("lobbyUpdate", { players, hostId });
+
+  // ---- Rooms handlers ----
+  socket.on("createRoom", ({ name } = {}) => {
+    const roomId = genRoomId();
+    rooms[roomId] = {
+      name: name ? name.toString().slice(0, 80) : null,
+      hostId: socket.id,
+      hostName: players[socket.id] || null,
+      players: { [socket.id]: players[socket.id] || null },
+      gameState: null,
+      timer: null,
+      _deletionTimeout: null
+    };
+    socket.join(roomId);
+    cancelRoomDeletion(roomId);
+    io.emit("roomList", buildRoomListPayload());
+    socket.emit("createRoomResult", { ok: true, roomId });
+    io.to(roomId).emit("lobbyUpdate", { players: rooms[roomId].players, hostId: rooms[roomId].hostId, roomId });
+    console.log("Sala criada:", roomId, "por", socket.id);
+  });
+
+  socket.on("requestRoomList", () => {
+    socket.emit("roomList", buildRoomListPayload());
+  });
+
+  // joinRoom supports callback ack
+  socket.on("joinRoom", (data = {}, callback) => {
+    try {
+      const roomId = data && data.roomId;
+      console.log("joinRoom recebido de", socket.id, "payload:", data);
+
+      if (!roomId || !rooms[roomId]) {
+        const msg = "Sala não encontrada.";
+        console.warn("joinRoom falhou (nao encontrada):", roomId);
+        console.log("Salas ativas agora:", Object.keys(rooms));
+        io.emit("roomList", buildRoomListPayload());
+        if (typeof callback === "function") callback({ ok: false, message: msg, roomId });
+        socket.emit("joinRoomResult", { ok: false, message: msg, roomId });
+        return;
+      }
+
+      const room = rooms[roomId];
+      room.players[socket.id] = players[socket.id] || null;
+      socket.join(roomId);
+      cancelRoomDeletion(roomId);
+
+      // reconnection: if the username equals hostName, reassign hostId to this socket
+      if (room.hostName && players[socket.id] && room.hostName === players[socket.id]) {
+        room.hostId = socket.id;
+        console.log(`Reatribuído host da sala ${roomId} para socket ${socket.id} (reconexão do host: ${room.hostName})`);
+      }
+
+      io.to(roomId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId });
+      io.emit("roomList", buildRoomListPayload());
+
+      console.log(`${socket.id} entrou na sala ${roomId} (username: ${players[socket.id] || "guest"})`);
+      if (typeof callback === "function") callback({ ok: true, roomId });
+      socket.emit("joinRoomResult", { ok: true, roomId });
+      // envia estado da sala diretamente para o socket que entrou (evita ver board global)
+      if (room.gameState) {
+        socket.emit("initState", {
+          board: room.gameState.board,
+          scores: room.gameState.scores,
+          endTime: room.gameState.endTime,
+          hostId: room.hostId,
+          ended: room.gameState.ended,
+          players: room.players
+        });
+      } else {
+        // se o jogo ainda não começou na sala, envie um init leve (opcional)
+        socket.emit("initState", {
+          board: gameState.board,
+          scores: gameState.scores,
+          endTime: gameState.endTime,
+          hostId,
+          ended: gameState.ended,
+          players: room.players
+        });
+      }
+    } catch (err) {
+      console.error("Erro em joinRoom:", err);
+      if (typeof callback === "function") callback({ ok: false, message: "Erro ao entrar na sala." });
+      socket.emit("joinRoomResult", { ok: false, message: "Erro ao entrar na sala." });
+    }
+  });
+
+  socket.on("leaveRoom", ({ roomId } = {}) => {
+    if (!roomId || !rooms[roomId]) return;
+    const room = rooms[roomId];
+    delete room.players[socket.id];
+    socket.leave(roomId);
+
+    if (socket.id === room.hostId) {
+      const remaining = Object.keys(room.players);
+      if (remaining.length) {
+        room.hostId = remaining[0];
+        room.hostName = room.players[room.hostId];
+        cancelRoomDeletion(roomId);
+      } else {
+        scheduleRoomDeletion(roomId, 10000);
+        io.emit("roomList", buildRoomListPayload());
+        return;
+      }
+    }
+
+    io.to(roomId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId });
+    io.emit("roomList", buildRoomListPayload());
+  });
+
+  socket.on("startGame", ({ roomId } = {}) => {
+    if (roomId) {
+      const room = rooms[roomId];
+      if (!room) return;
+      if (socket.id !== room.hostId) {
+        console.log("startGame ignorado — não é host da sala:", socket.id);
+        return;
+      }
+      console.log("Host iniciou partida na sala", roomId);
+
+      const board = generateBoard(defaultWordList, MIN_WORDS_DEFAULT);
+      const endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
+      room.gameState = { board, scores: {}, endTime, ended: false };
+
+      for (const sId of Object.keys(room.players)) room.gameState.scores[sId] = room.gameState.scores[sId] || 0;
+
+      if (room.timer) clearTimeout(room.timer);
+      const msLeft = Math.max(0, endTime - Date.now());
+      room.timer = setTimeout(() => {
+        if (room.gameState) room.gameState.ended = true;
+        io.to(roomId).emit("updateBoard", {
+          board: room.gameState.board,
+          scores: room.gameState.scores,
+          endTime: room.gameState.endTime,
+          hostId: room.hostId,
+          ended: true,
+          players: room.players
+        });
+      }, msLeft + 50);
+
+      io.to(roomId).emit("gameStarting", { roomId });
+      io.to(roomId).emit("updateBoard", {
+        board: room.gameState.board,
+        scores: room.gameState.scores,
+        endTime: room.gameState.endTime,
+        hostId: room.hostId,
+        ended: false,
+        players: room.players
+      });
       return;
     }
-    console.log("Host solicitou novo board:", socket.id);
-    gameState.board = generateBoard(defaultWordList, MIN_WORDS_DEFAULT);
-    gameState.endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
-    // broadcasta novo estado
-    io.emit("updateBoard", { board: gameState.board, scores: gameState.scores, endTime: gameState.endTime, hostId });
+
+    // global fallback start
+    if (socket.id !== hostId) {
+      console.log("startGame global ignorado — não é host:", socket.id);
+      return;
+    }
+    console.log("Host iniciou partida global:", socket.id);
+
+    gameState = {
+      board: generateBoard(defaultWordList, MIN_WORDS_DEFAULT),
+      scores: {},
+      endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000,
+      ended: false
+    };
+    const current = Array.from(io.sockets.sockets.keys());
+    for (const sId of current) gameState.scores[sId] = gameState.scores[sId] || 0;
+    scheduleEndTimer();
+    io.emit("gameStarting");
+    emitFullState(null, "updateBoard");
   });
 
-  // Quando alguém resolve palavra
-  socket.on("wordSolved", ({ word, x, y, dir }) => {
-    const entry = gameState.board.words.find(
-      w => w.word === word && w.x === x && w.y === y && w.dir === dir
-    );
+  // request new board (global)
+  socket.on("requestNewBoard", () => {
+    try {
+      if (socket.id !== hostId) {
+        console.log("requestNewBoard ignorado de", socket.id, "— não é host", hostId);
+        return;
+      }
+      console.log("Host solicitou novo board (global):", socket.id);
 
-    if (!entry) return;
-    if (!entry.completedBy) {
+      gameState.board = generateBoard(defaultWordList, MIN_WORDS_DEFAULT);
+      gameState.endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
+      gameState.ended = false;
+
+      const current = Array.from(io.sockets.sockets.keys());
+      const newScores = {};
+      for (const sId of current) newScores[sId] = gameState.scores[sId] || 0;
+      gameState.scores = newScores;
+
+      scheduleEndTimer();
+      emitFullState(null, "updateBoard");
+      console.log("Novo board global gerado e broadcastado.");
+    } catch (err) {
+      console.error("Erro em requestNewBoard:", err);
+    }
+  });
+
+  // wordSolved (room-aware)
+  socket.on("wordSolved", (payload) => {
+    try {
+      if (!payload || typeof payload !== "object") return;
+
+      const roomId = payload.roomId;
+      const word = (payload.word || "").toString().toUpperCase();
+      const x = toIntSafe(payload.x);
+      const y = toIntSafe(payload.y);
+      const dir = (payload.dir || "").toString();
+
+      if (!word || x === null || y === null || !isValidDir(dir)) {
+        console.log("wordSolved inválido de", socket.id, payload);
+        return;
+      }
+
+      // room-specific handling
+      if (roomId) {
+        const room = rooms[roomId];
+        if (!room || !room.gameState) {
+          console.log("wordSolved: room inválida ou jogo não iniciado:", roomId);
+          return;
+        }
+        if (room.gameState.ended || (room.gameState.endTime && Date.now() > room.gameState.endTime)) {
+          console.log("wordSolved ignorado — jogo da sala acabado:", socket.id, word);
+          return;
+        }
+        const entry = room.gameState.board.words.find(
+          w => w.word === word && w.x === x && w.y === y && w.dir === dir
+        );
+        if (!entry) { console.log("wordSolved sala não corresponde:", payload); return; }
+        if (entry.completedBy) { console.log("wordSolved sala já completada:", entry.completedBy); return; }
+
+        entry.completedBy = socket.id;
+        room.gameState.scores[socket.id] = (room.gameState.scores[socket.id] || 0) + POINTS_CORRECT;
+        console.log(`Palavra ${word} resolvida por ${socket.id} na sala ${roomId}. Pontos: ${room.gameState.scores[socket.id]}`);
+
+        // if last word completed -> evaluate winner and broadcast final result (optional improvement)
+        const allDone = room.gameState.board.words.every(w => w.completedBy);
+        if (allDone) {
+          room.gameState.ended = true;
+          // compute winner by score
+          const scores = room.gameState.scores;
+          let bestId = null, bestScore = -Infinity;
+          for (const [sId, pts] of Object.entries(scores)) {
+            if (pts > bestScore) { bestScore = pts; bestId = sId; }
+          }
+          io.to(roomId).emit("gameEnded", { winnerId: bestId, winnerScore: bestScore, scores, players: room.players });
+        }
+
+        io.to(roomId).emit("updateBoard", {
+          board: room.gameState.board,
+          scores: room.gameState.scores,
+          endTime: room.gameState.endTime,
+          hostId: room.hostId,
+          ended: room.gameState.ended,
+          players: room.players
+        });
+        return;
+      }
+
+      // fallback: global gameState
+      if (gameState.ended || (gameState.endTime && Date.now() > gameState.endTime)) {
+        console.log("wordSolved ignorado — jogo global acabado:", socket.id, word);
+        return;
+      }
+
+      const entry = gameState.board.words.find(
+        w => w.word === word && w.x === x && w.y === y && w.dir === dir
+      );
+      if (!entry) {
+        console.log("wordSolved não corresponde a entrada válida:", { word, x, y, dir }, "de", socket.id);
+        return;
+      }
+      if (entry.completedBy) {
+        console.log("wordSolved ignorado — já completada por", entry.completedBy);
+        return;
+      }
+
       entry.completedBy = socket.id;
       gameState.scores[socket.id] = (gameState.scores[socket.id] || 0) + POINTS_CORRECT;
+      console.log(`Palavra ${word} resolvida por ${socket.id} (${players[socket.id] || "guest"}). Pontos: ${gameState.scores[socket.id]}`);
+
+      // if last global word done -> finalize
+      const allDoneGlobal = gameState.board.words.every(w => w.completedBy);
+      if (allDoneGlobal) {
+        gameState.ended = true;
+        // compute global winner
+        const scores = gameState.scores;
+        let bestId = null, bestScore = -Infinity;
+        for (const [sId, pts] of Object.entries(scores)) {
+          if (pts > bestScore) { bestScore = pts; bestId = sId; }
+        }
+        io.emit("gameEnded", { winnerId: bestId, winnerScore: bestScore, scores, players });
+      }
+
+      emitFullState(null, "updateBoard");
+    } catch (err) {
+      console.error("Erro ao processar wordSolved:", err);
+    }
+  });
+
+  // disconnect: limpar players e remover de rooms se necessário (agenda exclusão)
+  socket.on("disconnect", () => {
+    console.log("Jogador saiu:", socket.id);
+
+    // track rooms that need updateBoard/lobbyUpdate
+    const affectedRooms = [];
+
+    // remove from any room
+    for (const [rId, room] of Object.entries(rooms)) {
+      if (room.players && room.players[socket.id] !== undefined) {
+        delete room.players[socket.id];
+        socket.leave(rId);
+        affectedRooms.push(rId);
+
+        if (socket.id === room.hostId) {
+          const remaining = Object.keys(room.players);
+          if (remaining.length) {
+            room.hostId = remaining[0];
+            room.hostName = room.players[room.hostId];
+            cancelRoomDeletion(rId);
+          } else {
+            // schedule deletion if empty
+            scheduleRoomDeletion(rId, 10000);
+            io.emit("roomList", buildRoomListPayload());
+            continue;
+          }
+        }
+        // emit lobbyUpdate only to affected room
+        io.to(rId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId: rId });
+      }
     }
 
-    io.emit("updateBoard", gameState);
-  });
+    // cleanup global
+    delete gameState.scores[socket.id];
+    delete players[socket.id];
 
+    if (socket.id === hostId) {
+      const remaining = Object.keys(gameState.scores);
+      hostId = remaining.length ? remaining[0] : null;
+      console.log("Host saiu — novo hostId:", hostId);
+    }
 
-    socket.on("disconnect", () => {
-      console.log("Jogador saiu:", socket.id);
-      delete gameState.scores[socket.id];
-      if (socket.id === hostId) {
-        const remaining = Object.keys(gameState.scores);
-        hostId = remaining.length ? remaining[0] : null;
+    // atualiza listas globais
+    io.emit("roomList", buildRoomListPayload());
+    io.emit("lobbyUpdate", { players, hostId });
+
+    // Emit updateBoard only to affected rooms that have a gameState running
+    for (const rId of affectedRooms) {
+      const room = rooms[rId];
+      if (room && room.gameState) {
+        io.to(rId).emit("updateBoard", {
+          board: room.gameState.board,
+          scores: room.gameState.scores,
+          endTime: room.gameState.endTime,
+          hostId: room.hostId,
+          ended: room.gameState.ended,
+          players: room.players
+        });
       }
-      // broadcast para atualizar placar/estado
-      io.emit("updateBoard", { board: gameState.board, scores: gameState.scores, endTime: gameState.endTime, hostId });
-    });
+    }
+
+    // If there are connected sockets outside any room, send them the global state
+    const socketsInRooms = new Set();
+    for (const r of Object.values(rooms)) {
+      if (r.players) Object.keys(r.players).forEach(sid => socketsInRooms.add(sid));
+    }
+    const allConnected = Array.from(io.sockets.sockets.keys());
+    const outsiders = allConnected.filter(sid => !socketsInRooms.has(sid));
+    if (outsiders.length && gameState && Array.isArray(gameState.board.words)) {
+      outsiders.forEach(sid => {
+        const s = io.sockets.sockets.get(sid);
+        if (s) {
+          s.emit("updateBoard", {
+            board: gameState.board,
+            scores: gameState.scores,
+            endTime: gameState.endTime,
+            hostId,
+            ended: gameState.ended,
+            players // global players map
+          });
+        }
+      });
+    }
+
   });
 
+}); // end io.on connection
+
+// start server
 server.listen(PORT, () => {
   console.log(`Servidor com Socket.IO rodando em http://localhost:${PORT}`);
 });

@@ -1,0 +1,5 @@
+.lobby-header { display:flex; gap:12px; align-items:center; justify-content:space-between; margin-top:8px; margin-bottom:10px; }
+.player-list { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
+.player-item { padding:8px 10px; border-radius:8px; background:#fff; border:1px solid rgba(0,0,0,0.04); display:flex; justify-content:space-between; align-items:center; }
+.controls { display:flex; gap:8px; margin-top:8px; }
+.host-badge { font-size:12px; color:var(--muted); margin-left:8px; }

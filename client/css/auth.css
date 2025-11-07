@@ -1,0 +1,70 @@
+:root {
+  --accent: #2b8aef;
+  --card: #fff;
+  --muted: #666;
+  --bg: linear-gradient(180deg,#eef3fb, #f7fafc);
+  --radius: 12px;
+  --shadow: 0 12px 36px rgba(12,30,50,0.08);
+}
+
+*{ box-sizing: border-box; }
+body{
+  margin:0;
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--bg);
+  padding: 20px;
+}
+
+.auth-page .card{
+  width: 380px;
+  background: var(--card);
+  padding: 22px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-align:center;
+}
+
+.auth-page h1{ margin:0 0 6px; font-size:22px; }
+.muted{ color:var(--muted); margin-top:6px; font-size:13px; }
+.small{ font-size:12px; color:var(--muted); }
+
+.form{ margin-top:14px; display:flex; flex-direction:column; gap:10px; }
+.form.hidden{ display:none; }
+
+.form input{
+  padding:12px 14px;
+  border-radius:10px;
+  border:1px solid #e1e6ee;
+  outline:none;
+  font-size:14px;
+}
+
+.buttons{ display:flex; gap:8px; margin-top:6px; }
+.btn{
+  flex:1;
+  padding:10px;
+  border-radius:8px;
+  border:none;
+  cursor:pointer;
+  font-weight:700;
+  background: var(--accent);
+  color:#fff;
+}
+.btn.secondary{
+  background:#eef6ff;
+  color:var(--accent);
+  font-weight:600;
+}
+
+.messages{
+  margin-top:8px;
+  min-height:22px;
+  font-weight:700;
+  color:#b94a48;
+  font-size:13px;
+  text-align:center;
+}

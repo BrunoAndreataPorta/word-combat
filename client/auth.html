@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <title>Word Combat — Login / Registrar</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="css/auth.css" />
+</head>
+<body>
+  <main class="auth-page">
+    <div class="card" role="main" aria-labelledby="title">
+      <h1 id="title">Word Combat</h1>
+      <div class="muted">Entre para começar a batalha de palavras</div>
+
+      <div id="messages" class="messages" aria-live="polite"></div>
+
+      <!-- LOGIN -->
+      <form id="login-form" class="form" autocomplete="on" novalidate>
+        <input id="email" name="email" placeholder="Email" autocomplete="username" required aria-label="Email" />
+        <input id="password" type="password" name="password" placeholder="Senha" autocomplete="current-password" required aria-label="Senha" />
+        <div class="buttons">
+          <button type="submit" id="login-btn" class="btn">Entrar</button>
+          <button type="button" id="show-register" class="btn secondary">Registrar</button>
+        </div>
+      </form>
+
+      <!-- REGISTER -->
+      <form id="register-form" class="form hidden" autocomplete="on" novalidate>
+        <input id="r-name" name="name" placeholder="Nome" autocomplete="name" required aria-label="Nome" />
+        <input id="r-email" name="email" placeholder="Email" autocomplete="email" required aria-label="Email" />
+        <input id="r-password" type="password" name="password" placeholder="Senha (mín 6 chars)" autocomplete="new-password" required aria-label="Senha" />
+        <div class="buttons">
+          <button type="submit" id="register-btn" class="btn">Registrar</button>
+          <button type="button" id="show-login" class="btn secondary">Voltar</button>
+        </div>
+      </form>
+
+      <p class="small">Após o login você será levado ao lobby onde a partida pode ser iniciada.</p>
+    </div>
+
+    <noscript style="text-align:center; margin-top:12px; color:#b94a48;">
+      Para usar este site é necessário habilitar o JavaScript no seu navegador.
+    </noscript>
+  </main>
+
+  <script src="js/auth.js"></script>
+</body>
+</html>
