@@ -9,16 +9,31 @@ Projeto final do curso de **Análise e Desenvolvimento de Sistemas** da **FATEC 
 
 ```
 word-combat/
+├── .gitignore
+├── READEME.MD
 ├── server/
 │   ├── index.js
 │   ├── package.json
 │   └── package-lock.json
 └── client/
+    ├── auth.html
+    ├── hub.html
     ├── index.html
-    ├── style.css
+    ├── lobby.html
     └── js/
-        ├── game.js
+        ├── auth.js
+        └── game.js
+        └── hub.js
+        └── lobby.js
         └── main.js
+    └── css/
+        ├── auth.css
+        └── hub.css
+        └── lobby.css
+        └── style.css
+        └── ui.css
+
+
 ```
 
 
@@ -35,16 +50,36 @@ word-combat/
    ```bash
    npm install
 
-4. Inicie o servidor:
+3. Inicie o servidor:
    ```bash
    node index.js
 
-5. Abra o jogo no navegador:
+4. Abra o jogo no navegador:
    ```bash
    http://localhost:3000
+
+⚙️ Arquivo .env
+
+Antes de iniciar o servidor, crie um arquivo chamado .env dentro da pasta server/ com o seguinte conteúdo:
+    
+    ```bash
+    # Banco de dados (ajuste conforme seu ambiente)
+    DB_HOST=localhost
+    DB_USER=root
+    DB_PASS=root
+    DB_NAME=wordcombat
+    
+    # JWT (autenticação)
+    JWT_SECRET=dev_secret
+    JWT_EXPIRES=7d
+    
+    # API de geração de palavras (Google Gemini)
+    GENAI_API_KEY=SUA_CHAVE_AQUI
 
 🧠 Tecnologias utilizadas
 Node.js
 Express
 Socket.io
-HTML, CSS e JavaScript puro
+HTML5
+CSS
+JavaScript
