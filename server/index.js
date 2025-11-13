@@ -6,12 +6,14 @@ const { Server } = require("socket.io");
 const bcrypt = require("bcryptjs");
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
+const axios = require("axios");
 const cookieParser = require("cookie-parser");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 const PORT = process.env.PORT || 3000;
+
 
 // ===== DB pool (mysql2/promise) =====
 const DB_CONFIG = {
@@ -406,6 +408,146 @@ function parseCookieHeader(cookieHeader = "") {
   return cookies;
 }
 
+// util: prompt builder
+function buildGenPrompt(count = 12, theme = null) {
+  return `
+Você é um gerador de listas de palavras para um jogo de palavras-cruzadas em português.
+Gere um array JSON com exatamente ${count} objetos em português.
+Formato: [{"word":"PALAVRA","hint":"Dica curta em português"}, ...]
+Regras:
+- Palavra em maiúsculas, apenas letras (A-Z e letras acentuadas em PT-BR). Min 3 e máx 12 caracteres.
+- Dica curta (2-8 palavras), sem quebras de linha.
+- Tema: ${theme || 'geral'}
+Responda APENAS com o JSON (sem explicações).
+  `.trim();
+}
+
+async function fetchGeneratedWords(count = 12, theme = null) {
+  const key = process.env.GENAI_API_KEY;
+  if (!key) throw new Error("GENAI_API_KEY não definido no servidor.");
+
+  // modelos candidatos (ordem de preferência)
+  const modelCandidates = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+
+  ];
+
+  const prompt = buildGenPrompt(count, theme);
+  const bodyContent = { contents: [{ parts: [{ text: prompt }] }] };
+
+  const maxAttemptsPerModel = 2; // tente no máximo 2 vezes por modelo
+  const baseDelay = 300; // ms base para backoff
+  const requestTimeout = 15000; // 15s por tentativa
+
+  function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+  function jitter(n){ return n + Math.floor(Math.random() * Math.max(100, n)); }
+
+  function extractTextFromResponse(rdata) {
+    // tenta várias formas comuns encontradas nas respostas da API
+    const cand = rdata?.candidates?.[0];
+    if (cand) {
+      const c = cand.content;
+      if (Array.isArray(c)) {
+        for (const block of c) {
+          if (block?.parts && Array.isArray(block.parts) && block.parts[0]?.text) return block.parts[0].text;
+          if (block?.text) return block.text;
+        }
+      } else if (c?.parts && Array.isArray(c.parts) && c.parts[0]?.text) {
+        return c.parts[0].text;
+      }
+    }
+    if (rdata?.output?.[0]?.content) return rdata.output[0].content;
+    return typeof rdata === "string" ? rdata : JSON.stringify(rdata);
+  }
+
+  let lastErr = null;
+
+  for (const modelId of modelCandidates) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${key}`;
+
+    for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
+      try {
+        console.log(`[GenAI] tentando modelo "${modelId}" (attempt ${attempt})`);
+        const res = await axios.post(url, bodyContent, {
+          headers: { "Content-Type": "application/json" },
+          timeout: requestTimeout
+        });
+
+        const text = extractTextFromResponse(res.data);
+        if (!text) throw new Error("Resposta vazia da API GenAI.");
+
+        // tenta parsear JSON puro ou extrair array JSON dentro do texto
+        let parsed = null;
+        try { parsed = JSON.parse(text); }
+        catch (e) {
+          const m = (text || "").match(/\[.*\]/s);
+          if (m) {
+            try { parsed = JSON.parse(m[0]); } catch (e2) { parsed = null; }
+          }
+        }
+
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          throw new Error(`GenAI retornou formato inesperado (modelo ${modelId}).`);
+        }
+
+        const clean = parsed.slice(0, count).map(item => {
+          const rawWord = (item.word || "").toString();
+          const word = rawWord.toUpperCase().replace(/[^A-Z\u00C0-\u017F]/g, "").slice(0, 12);
+          const hint = (item.hint || "").toString().slice(0, 80);
+          return { word, hint };
+        }).filter(x => x.word && x.word.length >= 3);
+
+        if (!clean.length) throw new Error("Nenhuma palavra válida encontrada no output.");
+
+        console.log(`[GenAI] sucesso com ${modelId} -> ${clean.length} palavras`);
+        return clean;
+
+      } catch (err) {
+        lastErr = err;
+        const status = err.response?.status || "no-status";
+        const snippet = err.response?.data ? (typeof err.response.data === "string" ? err.response.data : JSON.stringify(err.response.data)).slice(0,1200) : "";
+        console.warn(`[GenAI] erro em ${modelId} (attempt ${attempt}) status=${status} msg=${err.message}`);
+        if (snippet) console.warn(`[GenAI] response.data (trunc): ${snippet}`);
+
+        // somente retry para códigos retryable
+        const retryable = [429, 500, 502, 503, 504].includes(err.response?.status);
+        if (!retryable) {
+          console.warn(`[GenAI] erro não-retryable em ${modelId}, pulando para o próximo modelo.`);
+          break; // pula para o próximo modelo
+        }
+
+        const delay = jitter(baseDelay * Math.pow(2, attempt - 1));
+        console.log(`[GenAI] aguardando ${delay}ms antes da próxima tentativa...`);
+        await sleep(delay);
+      }
+    } // attempts
+  } // models
+
+  console.error("GenAI: todas as tentativas falharam. Último erro:", lastErr?.message || lastErr);
+  throw lastErr || new Error("GenAI falhou sem mensagem de erro.");
+}
+
+app.post("/api/generate-words", async (req, res) => {
+  try {
+    const { count = 12, theme = null } = req.body || {};
+
+    try {
+      const words = await fetchGeneratedWords(count, theme);
+      return res.json({ ok: true, words });
+    } catch (err) {
+      console.warn("GenAI falhou:", err.message || err);
+      // fallback para sua lista local
+      const fallback = (defaultWordList || []).slice(0, count).map(w => ({ word: w.word.toString().toUpperCase(), hint: w.hint }));
+      return res.json({ ok: true, words: fallback, fallback: true });
+    }
+  } catch (err) {
+    console.error("Erro /api/generate-words:", err);
+    const fallback = (defaultWordList || []).slice(0, 12).map(w => ({ word: w.word.toString().toUpperCase(), hint: w.hint }));
+    return res.status(500).json({ ok: false, message: "Erro no servidor.", words: fallback });
+  }
+});
+
 // ===== socket.io connection handling (integrated with cookie/JWT auth) =====
 io.on("connection", (socket) => {
   console.log("Novo jogador conectado (socket):", socket.id);
@@ -553,93 +695,191 @@ io.on("connection", (socket) => {
     io.emit("roomList", buildRoomListPayload());
   });
 
-  socket.on("startGame", ({ roomId } = {}) => {
-    if (roomId) {
-      const room = rooms[roomId];
-      if (!room) return;
-      if (socket.id !== room.hostId) {
-        console.log("startGame ignorado — não é host da sala:", socket.id);
-        return;
+  // socket.on("startGame", ({ roomId } = {}) => {
+  //   if (roomId) {
+  //     const room = rooms[roomId];
+  //     if (!room) return;
+  //     if (socket.id !== room.hostId) {
+  //       console.log("startGame ignorado — não é host da sala:", socket.id);
+  //       return;
+  //     }
+  //     console.log("Host iniciou partida na sala", roomId);
+
+  //     const board = generateBoard(defaultWordList, MIN_WORDS_DEFAULT);
+  //     const endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
+  //     room.gameState = { board, scores: {}, endTime, ended: false };
+
+  //     for (const sId of Object.keys(room.players)) room.gameState.scores[sId] = room.gameState.scores[sId] || 0;
+
+  //     if (room.timer) clearTimeout(room.timer);
+  //     const msLeft = Math.max(0, endTime - Date.now());
+  //     room.timer = setTimeout(() => {
+  //       if (room.gameState) room.gameState.ended = true;
+  //       io.to(roomId).emit("updateBoard", {
+  //         board: room.gameState.board,
+  //         scores: room.gameState.scores,
+  //         endTime: room.gameState.endTime,
+  //         hostId: room.hostId,
+  //         ended: true,
+  //         players: room.players
+  //       });
+  //     }, msLeft + 50);
+
+  //     io.to(roomId).emit("gameStarting", { roomId });
+  //     io.to(roomId).emit("updateBoard", {
+  //       board: room.gameState.board,
+  //       scores: room.gameState.scores,
+  //       endTime: room.gameState.endTime,
+  //       hostId: room.hostId,
+  //       ended: false,
+  //       players: room.players
+  //     });
+  //     return;
+  //   }
+
+  //   // global fallback start
+  //   if (socket.id !== hostId) {
+  //     console.log("startGame global ignorado — não é host:", socket.id);
+  //     return;
+  //   }
+  //   console.log("Host iniciou partida global:", socket.id);
+
+  //   gameState = {
+  //     board: generateBoard(defaultWordList, MIN_WORDS_DEFAULT),
+  //     scores: {},
+  //     endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000,
+  //     ended: false
+  //   };
+  //   const current = Array.from(io.sockets.sockets.keys());
+  //   for (const sId of current) gameState.scores[sId] = gameState.scores[sId] || 0;
+  //   scheduleEndTimer();
+  //   io.emit("gameStarting");
+  //   emitFullState(null, "updateBoard");
+  // });
+
+  // // request new board (global)
+  // socket.on("requestNewBoard", () => {
+  //   try {
+  //     if (socket.id !== hostId) {
+  //       console.log("requestNewBoard ignorado de", socket.id, "— não é host", hostId);
+  //       return;
+  //     }
+  //     console.log("Host solicitou novo board (global):", socket.id);
+
+  //     gameState.board = generateBoard(defaultWordList, MIN_WORDS_DEFAULT);
+  //     gameState.endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
+  //     gameState.ended = false;
+
+  //     const current = Array.from(io.sockets.sockets.keys());
+  //     const newScores = {};
+  //     for (const sId of current) newScores[sId] = gameState.scores[sId] || 0;
+  //     gameState.scores = newScores;
+
+  //     scheduleEndTimer();
+  //     emitFullState(null, "updateBoard");
+  //     console.log("Novo board global gerado e broadcastado.");
+  //   } catch (err) {
+  //     console.error("Erro em requestNewBoard:", err);
+  //   }
+  // });
+
+  // substitua o handler startGame existente por ESTE (dentro de io.on("connection", socket) { ... })
+  socket.on("startGame", async ({ roomId, useGen = false, count = 12, theme = null } = {}) => {
+    try {
+      // limites defensivos
+      count = Math.max(4, Math.min(16, Number(count) || 12));
+      let wordPool = (defaultWordList || []).slice(0).map(w => ({ word: w.word.toString().toUpperCase(), hint: w.hint || "" }));
+
+      if (useGen && typeof fetchGeneratedWords === "function") {
+        try {
+          // não bloqueia demais: se a GenAI demorar, seguimos com fallback
+          const genTimeoutMs = 4000; // ajuste entre 2000-6000ms conforme preferir
+          const generated = await Promise.race([
+            fetchGeneratedWords(count, theme),
+            new Promise(resolve => setTimeout(() => resolve(null), genTimeoutMs))
+          ]);
+
+          if (Array.isArray(generated) && generated.length) {
+            wordPool = generated.slice(0, count);
+            console.log(`GenAI: geradas ${wordPool.length} palavras (theme=${theme || 'geral'})`);
+          } else {
+            console.warn("GenAI não respondeu a tempo ou retornou nulo — usando fallback local.");
+          }
+        } catch (err) {
+          console.warn("Erro ao gerar palavras com GenAI, usando fallback local. Erro:", err?.message || err);
+        }
+      } else if (useGen) {
+        console.warn("useGen solicitado mas fetchGeneratedWords não encontrado — usando fallback local.");
       }
-      console.log("Host iniciou partida na sala", roomId);
 
-      const board = generateBoard(defaultWordList, MIN_WORDS_DEFAULT);
-      const endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
-      room.gameState = { board, scores: {}, endTime, ended: false };
+      // --- geração do tabuleiro usando wordPool ---
+      if (roomId) {
+        const room = rooms[roomId];
+        if (!room) {
+          console.warn("startGame: roomId inválido", roomId);
+          return;
+        }
+        if (socket.id !== room.hostId) {
+          console.log("startGame ignorado — não é host da sala:", socket.id);
+          return;
+        }
 
-      for (const sId of Object.keys(room.players)) room.gameState.scores[sId] = room.gameState.scores[sId] || 0;
+        const board = generateBoard(wordPool, MIN_WORDS_DEFAULT);
+        const endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
+        room.gameState = { board, scores: {}, endTime, ended: false };
 
-      if (room.timer) clearTimeout(room.timer);
-      const msLeft = Math.max(0, endTime - Date.now());
-      room.timer = setTimeout(() => {
-        if (room.gameState) room.gameState.ended = true;
+        for (const sId of Object.keys(room.players)) room.gameState.scores[sId] = room.gameState.scores[sId] || 0;
+
+        if (room.timer) clearTimeout(room.timer);
+        const msLeft = Math.max(0, endTime - Date.now());
+        room.timer = setTimeout(() => {
+          if (room.gameState) room.gameState.ended = true;
+          io.to(roomId).emit("updateBoard", {
+            board: room.gameState.board,
+            scores: room.gameState.scores,
+            endTime: room.gameState.endTime,
+            hostId: room.hostId,
+            ended: true,
+            players: room.players
+          });
+        }, msLeft + 50);
+
+        io.to(roomId).emit("gameStarting", { roomId });
         io.to(roomId).emit("updateBoard", {
           board: room.gameState.board,
           scores: room.gameState.scores,
           endTime: room.gameState.endTime,
           hostId: room.hostId,
-          ended: true,
+          ended: false,
           players: room.players
         });
-      }, msLeft + 50);
-
-      io.to(roomId).emit("gameStarting", { roomId });
-      io.to(roomId).emit("updateBoard", {
-        board: room.gameState.board,
-        scores: room.gameState.scores,
-        endTime: room.gameState.endTime,
-        hostId: room.hostId,
-        ended: false,
-        players: room.players
-      });
-      return;
-    }
-
-    // global fallback start
-    if (socket.id !== hostId) {
-      console.log("startGame global ignorado — não é host:", socket.id);
-      return;
-    }
-    console.log("Host iniciou partida global:", socket.id);
-
-    gameState = {
-      board: generateBoard(defaultWordList, MIN_WORDS_DEFAULT),
-      scores: {},
-      endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000,
-      ended: false
-    };
-    const current = Array.from(io.sockets.sockets.keys());
-    for (const sId of current) gameState.scores[sId] = gameState.scores[sId] || 0;
-    scheduleEndTimer();
-    io.emit("gameStarting");
-    emitFullState(null, "updateBoard");
-  });
-
-  // request new board (global)
-  socket.on("requestNewBoard", () => {
-    try {
-      if (socket.id !== hostId) {
-        console.log("requestNewBoard ignorado de", socket.id, "— não é host", hostId);
         return;
       }
-      console.log("Host solicitou novo board (global):", socket.id);
 
-      gameState.board = generateBoard(defaultWordList, MIN_WORDS_DEFAULT);
-      gameState.endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
-      gameState.ended = false;
+      // fallback global
+      if (socket.id !== hostId) {
+        console.log("startGame global ignorado — não é host:", socket.id);
+        return;
+      }
 
+      gameState = {
+        board: generateBoard(wordPool, MIN_WORDS_DEFAULT),
+        scores: {},
+        endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000,
+        ended: false
+      };
       const current = Array.from(io.sockets.sockets.keys());
-      const newScores = {};
-      for (const sId of current) newScores[sId] = gameState.scores[sId] || 0;
-      gameState.scores = newScores;
-
+      for (const sId of current) gameState.scores[sId] = gameState.scores[sId] || 0;
       scheduleEndTimer();
+      io.emit("gameStarting");
       emitFullState(null, "updateBoard");
-      console.log("Novo board global gerado e broadcastado.");
+
     } catch (err) {
-      console.error("Erro em requestNewBoard:", err);
+      console.error("Erro em startGame:", err);
     }
   });
+
+
 
   // wordSolved (room-aware)
   socket.on("wordSolved", (payload) => {
