@@ -8,12 +8,24 @@ const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
 const cookieParser = require("cookie-parser");
+const fs = require("fs");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-const PORT = process.env.PORT || 3000;
 
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
+
+server.listen(PORT, HOST, () => {
+  console.log(`Servidor com Socket.IO rodando em http://${HOST === '0.0.0.0' ? '0.0.0.0' : HOST}:${PORT}`);
+  console.log("Acesse pelo navegador de outra máquina: http://<IP_LOCAL_DO_HOST>:"+PORT);
+});
+
+
+// data persistence for default words
+const DATA_DIR = path.join(__dirname, "..", "data");
+const DEFAULT_WORDS_FILE = path.join(DATA_DIR, "defaultWords.json");
 
 // ===== DB pool (mysql2/promise) =====
 const DB_CONFIG = {
@@ -162,7 +174,12 @@ const MIN_WORDS_DEFAULT = 8;
 const MAX_GLOBAL_ATTEMPTS = 50;
 const MAX_TRIES_PER_ATTEMPT = 15;
 
-const defaultWordList = [
+// allow larger generation requests up to 24
+const MAX_GEN_COUNT = 24;
+const DEFAULT_GEN_COUNT = 20;
+
+// default inicial (seu array atual) — agora mutável (let)
+let defaultWordList = [
   { word: "CASA", hint: "Onde moramos" },
   { word: "LUZ", hint: "Ilumina o ambiente" },
   { word: "MAR", hint: "Água salgada" },
@@ -179,6 +196,48 @@ const defaultWordList = [
   { word: "CHUVA", hint: "Água que cai do céu" },
   { word: "CEU", hint: "Fica acima de nós" }
 ];
+
+// ---- sanitize utility: normalize words (remove accents) ----
+function sanitizeWord(raw) {
+  if (!raw) return "";
+  let s = String(raw).toUpperCase();
+  // NFD + remove combining diacritics (acentos)
+  s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  // keep only A-Z
+  s = s.replace(/[^A-Z]/g, "");
+  return s.slice(0, 12);
+}
+
+function loadDefaultWordsFromDisk() {
+  try {
+    if (fs.existsSync(DEFAULT_WORDS_FILE)) {
+      const raw = fs.readFileSync(DEFAULT_WORDS_FILE, "utf8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        defaultWordList = parsed.map(w => ({
+          word: sanitizeWord(w.word),
+          hint: (w.hint || "").toString().slice(0, 80)
+        })).filter(x => x.word && x.word.length >= 3);
+        console.log("defaultWordList carregada de disco:", DEFAULT_WORDS_FILE);
+      }
+    }
+  } catch (err) {
+    console.warn("Não foi possível carregar defaultWords do disco:", err.message || err);
+  }
+}
+
+function persistDefaultWordsToDisk(list) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(DEFAULT_WORDS_FILE, JSON.stringify(list, null, 2), "utf8");
+    console.log("defaultWordList persistida em disco:", DEFAULT_WORDS_FILE);
+  } catch (err) {
+    console.warn("Falha ao persistir defaultWords:", err.message || err);
+  }
+}
+
+// carrega possivel arquivo salvo (se existir) logo ao iniciar
+loadDefaultWordsFromDisk();
 
 const POINTS_CORRECT = 10;
 const POINTS_WRONG = -5;
@@ -245,6 +304,16 @@ function findCrossPlacementOnGrid(grid, placedWords, entry) {
   return false;
 }
 
+// Fisher-Yates shuffle (more uniform than .sort)
+function shuffleArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 function generateBoard(wordList = defaultWordList, minWords = MIN_WORDS_DEFAULT) {
   let attempts = 0;
   let success = false;
@@ -255,8 +324,8 @@ function generateBoard(wordList = defaultWordList, minWords = MIN_WORDS_DEFAULT)
     attempts++;
     const grid = {};
     const placedWords = [];
-    const pool = wordList.map(w => ({ word: w.word.toString().toUpperCase(), hint: w.hint || "" }))
-                         .sort(() => Math.random() - 0.5);
+    // use fisher-yates shuffle for better randomness
+    const pool = shuffleArray(wordList.map(w => ({ word: sanitizeWord(w.word), hint: w.hint || "" })));
 
     const first = pool.shift();
     const startX = Math.floor((GRID_SIZE - first.word.length) / 2);
@@ -285,10 +354,11 @@ function generateBoard(wordList = defaultWordList, minWords = MIN_WORDS_DEFAULT)
 }
 
 // ===== game state (global fallback) =====
+// NOTE: endTime starts as null now — timer will start only when startGame is called
 let gameState = {
   board: generateBoard(defaultWordList, MIN_WORDS_DEFAULT),
   scores: {}, // socketId -> points
-  endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000,
+  endTime: null,
   ended: false
 };
 
@@ -298,7 +368,7 @@ let hostId = null;
 const players = {};
 
 // ===== Rooms/Salas =====
-const rooms = {}; // roomId -> { name, hostId, hostName, players: { socketId: username }, gameState?, timer?, _deletionTimeout? }
+const rooms = {}; // roomId -> { name, hostId, hostName, players: { socketId: username }, gameState?, timer?, _deletionTimeout?, aiOptions? }
 
 function genRoomId() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -314,7 +384,8 @@ function buildRoomListPayload() {
       name: r.name || null,
       hostId: r.hostId,
       hostName: r.hostName || null,
-      players: r.players || {}
+      players: r.players || {},
+      aiOptions: r.aiOptions || null
     };
   }
   return out;
@@ -370,8 +441,14 @@ function emitFullState(targetSocket = null, eventName = null) {
 }
 
 // timer (global fallback)
+// scheduleEndTimer now checks for existence of endTime and logs scheduling
 let _endTimerTimeout = null;
 function scheduleEndTimer() {
+  if (!gameState.endTime) {
+    // nothing to schedule
+    console.log("scheduleEndTimer: endTime não definido — nada agendado.");
+    return;
+  }
   if (_endTimerTimeout) {
     clearTimeout(_endTimerTimeout);
     _endTimerTimeout = null;
@@ -380,6 +457,7 @@ function scheduleEndTimer() {
   if (msLeft === 0) {
     finalizeGame();
   } else {
+    console.log(`scheduleEndTimer: agendando finalização global em ${msLeft}ms`);
     _endTimerTimeout = setTimeout(() => {
       finalizeGame();
     }, msLeft + 50);
@@ -391,7 +469,7 @@ function finalizeGame() {
   console.log("Tempo do jogo esgotou — finalizando (global).");
   emitFullState(null, "updateBoard");
 }
-scheduleEndTimer();
+// NOTE: não chamar scheduleEndTimer na inicialização — só quando startGame for chamado
 
 function isValidDir(d){ return d === "H" || d === "V"; }
 function toIntSafe(v){ const n = Number(v); return Number.isFinite(n) ? Math.floor(n) : null; }
@@ -409,42 +487,55 @@ function parseCookieHeader(cookieHeader = "") {
 }
 
 // util: prompt builder
-function buildGenPrompt(count = 12, theme = null) {
+function buildGenPrompt(count = DEFAULT_GEN_COUNT, theme = null) {
   return `
 Você é um gerador de listas de palavras para um jogo de palavras-cruzadas em português.
 Gere um array JSON com exatamente ${count} objetos em português.
 Formato: [{"word":"PALAVRA","hint":"Dica curta em português"}, ...]
 Regras:
-- Palavra em maiúsculas, apenas letras (A-Z e letras acentuadas em PT-BR). Min 3 e máx 12 caracteres.
+- Palavra em maiúsculas, apenas letras (A-Z e letras sem acentos em PT-BR). Min 3 e máx 12 caracteres.
 - Dica curta (2-8 palavras), sem quebras de linha.
 - Tema: ${theme || 'geral'}
 Responda APENAS com o JSON (sem explicações).
   `.trim();
 }
 
-async function fetchGeneratedWords(count = 12, theme = null) {
+// ===== GenAI cache to reduce calls =====
+const genCache = new Map(); // key -> { words: [...], ts }
+const GEN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function fetchGeneratedWords(count = DEFAULT_GEN_COUNT, theme = null) {
   const key = process.env.GENAI_API_KEY;
   if (!key) throw new Error("GENAI_API_KEY não definido no servidor.");
 
-  // modelos candidatos (ordem de preferência)
+  // clamp count defensively
+  count = Math.max(4, Math.min(MAX_GEN_COUNT, Number(count) || DEFAULT_GEN_COUNT));
+
+  const cacheKey = `c${count}:t${theme || "null"}`;
+  const cached = genCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < GEN_CACHE_TTL) {
+    console.log(`[GenAI][cache] HIT for ${cacheKey} - reusing ${cached.words.length} words`);
+    return cached.words.slice(0, count);
+  }
+
+  // modelos candidatos (ordem de preferência: use the cheaper flash first)
   const modelCandidates = [
     "gemini-2.5-flash",
     "gemini-2.5-pro",
-
   ];
 
   const prompt = buildGenPrompt(count, theme);
   const bodyContent = { contents: [{ parts: [{ text: prompt }] }] };
 
-  const maxAttemptsPerModel = 2; // tente no máximo 2 vezes por modelo
+  // try flash first; keep attempts minimal to save quota
+  const maxAttemptsPerModel = 1;
   const baseDelay = 300; // ms base para backoff
-  const requestTimeout = 15000; // 15s por tentativa
+  const requestTimeout = 25000; // 25s por tentativa (maior para permitir respostas mais lentas)
 
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
   function jitter(n){ return n + Math.floor(Math.random() * Math.max(100, n)); }
 
   function extractTextFromResponse(rdata) {
-    // tenta várias formas comuns encontradas nas respostas da API
     const cand = rdata?.candidates?.[0];
     if (cand) {
       const c = cand.content;
@@ -468,7 +559,7 @@ async function fetchGeneratedWords(count = 12, theme = null) {
 
     for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
       try {
-        console.log(`[GenAI] tentando modelo "${modelId}" (attempt ${attempt})`);
+        console.log(`[GenAI] tentando modelo "${modelId}" (attempt ${attempt}) tema="${theme || 'geral'}" count=${count}`);
         const res = await axios.post(url, bodyContent, {
           headers: { "Content-Type": "application/json" },
           timeout: requestTimeout
@@ -493,7 +584,7 @@ async function fetchGeneratedWords(count = 12, theme = null) {
 
         const clean = parsed.slice(0, count).map(item => {
           const rawWord = (item.word || "").toString();
-          const word = rawWord.toUpperCase().replace(/[^A-Z\u00C0-\u017F]/g, "").slice(0, 12);
+          const word = sanitizeWord(rawWord);
           const hint = (item.hint || "").toString().slice(0, 80);
           return { word, hint };
         }).filter(x => x.word && x.word.length >= 3);
@@ -501,8 +592,11 @@ async function fetchGeneratedWords(count = 12, theme = null) {
         if (!clean.length) throw new Error("Nenhuma palavra válida encontrada no output.");
 
         console.log(`[GenAI] sucesso com ${modelId} -> ${clean.length} palavras`);
-        return clean;
+        console.log(`[GenAI] palavras geradas (tema=${theme || 'geral'}): ${clean.map(c => c.word).join(", ")}`);
 
+        // cache result
+        genCache.set(cacheKey, { words: clean, ts: Date.now() });
+        return clean;
       } catch (err) {
         lastErr = err;
         const status = err.response?.status || "no-status";
@@ -522,6 +616,7 @@ async function fetchGeneratedWords(count = 12, theme = null) {
         await sleep(delay);
       }
     } // attempts
+    // if we tried flash and it failed with retryable error, we'll continue to next model
   } // models
 
   console.error("GenAI: todas as tentativas falharam. Último erro:", lastErr?.message || lastErr);
@@ -530,20 +625,42 @@ async function fetchGeneratedWords(count = 12, theme = null) {
 
 app.post("/api/generate-words", async (req, res) => {
   try {
-    const { count = 12, theme = null } = req.body || {};
+    const { count = DEFAULT_GEN_COUNT, theme = null, replaceDefault = false } = req.body || {};
 
     try {
       const words = await fetchGeneratedWords(count, theme);
-      return res.json({ ok: true, words });
+      // words já é array de { word, hint } (limpos)
+      if (Array.isArray(words) && words.length) {
+        const clean = words.slice(0, count).map(w => ({
+          word: sanitizeWord(w.word),
+          hint: (w.hint || "").toString().slice(0, 80)
+        })).filter(x => x.word && x.word.length >= 3);
+
+        if (clean.length) {
+          // log também aqui (endpoint)
+          console.log(`[api/generate-words] retorno final (tema=${theme || 'geral'}): ${clean.map(c => c.word).join(", ")}`);
+
+          if (replaceDefault) {
+            defaultWordList = clean.map(w => ({ word: w.word, hint: w.hint }));
+            persistDefaultWordsToDisk(defaultWordList);
+            console.log("defaultWordList substituída pela GenAI via /api/generate-words (replaceDefault=true).");
+          }
+          return res.json({ ok: true, words: clean, fallback: false });
+        }
+      }
+
+      // se chegou aqui, GenAI devolveu algo inválido
+      throw new Error("GenAI retornou formato inválido ou vazio.");
     } catch (err) {
       console.warn("GenAI falhou:", err.message || err);
-      // fallback para sua lista local
-      const fallback = (defaultWordList || []).slice(0, count).map(w => ({ word: w.word.toString().toUpperCase(), hint: w.hint }));
+      // fallback para sua lista local atual (pode ter sido carregada do disco)
+      const fallback = (defaultWordList || []).slice(0, count).map(w => ({ word: sanitizeWord(w.word), hint: w.hint || "" }));
+      console.log(`[api/generate-words] fallback usado: ${fallback.map(c => c.word).join(", ")}`);
       return res.json({ ok: true, words: fallback, fallback: true });
     }
   } catch (err) {
     console.error("Erro /api/generate-words:", err);
-    const fallback = (defaultWordList || []).slice(0, 12).map(w => ({ word: w.word.toString().toUpperCase(), hint: w.hint }));
+    const fallback = (defaultWordList || []).slice(0, DEFAULT_GEN_COUNT).map(w => ({ word: sanitizeWord(w.word), hint: w.hint || "" }));
     return res.status(500).json({ ok: false, message: "Erro no servidor.", words: fallback });
   }
 });
@@ -588,7 +705,10 @@ io.on("connection", (socket) => {
   io.emit("lobbyUpdate", { players, hostId });
 
   // ---- Rooms handlers ----
-  socket.on("createRoom", ({ name } = {}) => {
+  // createRoom now accepts aiOptions and stores them on the room
+  socket.on("createRoom", ({ name, aiOptions } = {}) => {
+    // ensure count limit up to MAX_GEN_COUNT; default to DEFAULT_GEN_COUNT
+    const roomCount = aiOptions && aiOptions.count ? Math.max(4, Math.min(MAX_GEN_COUNT, Number(aiOptions.count) || DEFAULT_GEN_COUNT)) : undefined;
     const roomId = genRoomId();
     rooms[roomId] = {
       name: name ? name.toString().slice(0, 80) : null,
@@ -597,14 +717,20 @@ io.on("connection", (socket) => {
       players: { [socket.id]: players[socket.id] || null },
       gameState: null,
       timer: null,
-      _deletionTimeout: null
+      _deletionTimeout: null,
+      aiOptions: aiOptions ? {
+        useGen: !!aiOptions.useGen,
+        count: roomCount || DEFAULT_GEN_COUNT,
+        theme: aiOptions.theme ? aiOptions.theme.toString().slice(0,80) : null,
+        replaceDefault: !!aiOptions.replaceDefault
+      } : null
     };
     socket.join(roomId);
     cancelRoomDeletion(roomId);
     io.emit("roomList", buildRoomListPayload());
     socket.emit("createRoomResult", { ok: true, roomId });
-    io.to(roomId).emit("lobbyUpdate", { players: rooms[roomId].players, hostId: rooms[roomId].hostId, roomId });
-    console.log("Sala criada:", roomId, "por", socket.id);
+    io.to(roomId).emit("lobbyUpdate", { players: rooms[roomId].players, hostId: rooms[roomId].hostId, roomId, aiOptions: rooms[roomId].aiOptions });
+    console.log("Sala criada:", roomId, "por", socket.id, "aiOptions:", rooms[roomId].aiOptions);
   });
 
   socket.on("requestRoomList", () => {
@@ -638,7 +764,7 @@ io.on("connection", (socket) => {
         console.log(`Reatribuído host da sala ${roomId} para socket ${socket.id} (reconexão do host: ${room.hostName})`);
       }
 
-      io.to(roomId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId });
+      io.to(roomId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId, aiOptions: room.aiOptions });
       io.emit("roomList", buildRoomListPayload());
 
       console.log(`${socket.id} entrou na sala ${roomId} (username: ${players[socket.id] || "guest"})`);
@@ -691,35 +817,82 @@ io.on("connection", (socket) => {
       }
     }
 
-    io.to(roomId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId });
+    io.to(roomId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId, aiOptions: room.aiOptions });
     io.emit("roomList", buildRoomListPayload());
   });
 
-  socket.on("startGame", async ({ roomId, useGen = false, count = 12, theme = null } = {}) => {
+  socket.on("startGame", async ({ roomId, useGen = undefined, count = DEFAULT_GEN_COUNT, theme = null, replaceDefault = undefined } = {}) => {
     try {
-      // limites defensivos
-      count = Math.max(4, Math.min(16, Number(count) || 12));
-      let wordPool = (defaultWordList || []).slice(0).map(w => ({ word: w.word.toString().toUpperCase(), hint: w.hint || "" }));
+      // limites defensivos, agora até MAX_GEN_COUNT
+      count = Math.max(4, Math.min(MAX_GEN_COUNT, Number(count) || DEFAULT_GEN_COUNT));
 
-      if (useGen && typeof fetchGeneratedWords === "function") {
+      // If room-specific AI options exist and the startGame call didn't explicitly override them,
+      // use the room.aiOptions saved at creation time.
+      let roomAi = null;
+      if (roomId && rooms[roomId] && rooms[roomId].aiOptions) {
+        roomAi = rooms[roomId].aiOptions;
+      }
+
+      // Determine effective options (priority: explicit args > room.aiOptions > defaults)
+      const effectiveUseGen = (typeof useGen === "boolean") ? useGen : (!!roomAi && !!roomAi.useGen);
+      const effectiveCount = (typeof count === "number") ? count : (roomAi && roomAi.count) ? roomAi.count : DEFAULT_GEN_COUNT;
+      // explicitly favor explicit theme param; else fallback to roomAi.theme
+      const effectiveTheme = (typeof theme === "string" && theme.trim().length) ? theme.trim() : (roomAi && roomAi.theme) ? roomAi.theme : null;
+      const effectiveReplaceDefault = (typeof replaceDefault === "boolean") ? replaceDefault : (!!roomAi && !!roomAi.replaceDefault);
+
+      console.log(`[startGame] roomId=${roomId || 'global'} effectiveUseGen=${!!effectiveUseGen} effectiveCount=${effectiveCount} effectiveTheme=${effectiveTheme || 'null'}`);
+
+      let wordPool = (defaultWordList || []).slice(0).map(w => ({ word: sanitizeWord(w.word), hint: w.hint || "" }));
+
+      if (effectiveUseGen && typeof fetchGeneratedWords === "function") {
         try {
-          // não bloqueia demais: se a GenAI demorar, seguimos com fallback
-          const genTimeoutMs = 4000; // ajuste entre 2000-6000ms conforme preferir
+          // notify clients in the room that the board generation is starting
+          if (roomId) {
+            io.to(roomId).emit("boardGenerating", { message: "ESPERE — O TABULEIRO ESTÁ SENDO GERADO" });
+          } else {
+            io.emit("boardGenerating", { message: "ESPERE — O TABULEIRO ESTÁ SENDO GERADO" });
+          }
+
+          // aumentamos o timeout para 30s para permitir respostas mais lentas da IA
+          const genTimeoutMs = 30000; // 30s
+          const genStartTs = Date.now();
+
           const generated = await Promise.race([
-            fetchGeneratedWords(count, theme),
+            (async () => {
+              const res = await fetchGeneratedWords(effectiveCount, effectiveTheme);
+              console.log(`[GenAI] tempo total de geração: ${Date.now() - genStartTs}ms (tema=${effectiveTheme || 'geral'})`);
+              return res;
+            })(),
             new Promise(resolve => setTimeout(() => resolve(null), genTimeoutMs))
           ]);
 
           if (Array.isArray(generated) && generated.length) {
-            wordPool = generated.slice(0, count);
-            console.log(`GenAI: geradas ${wordPool.length} palavras (theme=${theme || 'geral'})`);
+            const cleaned = generated.slice(0, effectiveCount).map(w => ({
+              word: sanitizeWord(w.word),
+              hint: (w.hint || "").toString().slice(0, 80)
+            })).filter(x => x.word && x.word.length >= 3);
+
+            if (cleaned.length) {
+              wordPool = cleaned;
+              console.log(`GenAI: geradas ${wordPool.length} palavras (tema=${effectiveTheme || "geral"})`);
+              console.log(`[startGame] palavras usadas: ${wordPool.map(w=>w.word).join(", ")}`);
+              if (effectiveReplaceDefault) {
+                defaultWordList = wordPool.map(w => ({ word: w.word, hint: w.hint || "" }));
+                persistDefaultWordsToDisk(defaultWordList);
+                console.log("defaultWordList substituída pela GenAI via startGame (replaceDefault=true).");
+              }
+            } else {
+              console.warn("GenAI retornou palavras inválidas — usando fallback local.");
+            }
           } else {
             console.warn("GenAI não respondeu a tempo ou retornou nulo — usando fallback local.");
+            console.log(`[startGame] fallback words: ${wordPool.map(w=>w.word).join(", ")}`);
           }
         } catch (err) {
           console.warn("Erro ao gerar palavras com GenAI, usando fallback local. Erro:", err?.message || err);
+          console.log(`[startGame] fallback words (erro): ${wordPool.map(w=>w.word).join(", ")}`);
         }
-      } else if (useGen) {
+      } else if (effectiveUseGen) {
         console.warn("useGen solicitado mas fetchGeneratedWords não encontrado — usando fallback local.");
       }
 
@@ -773,6 +946,7 @@ io.on("connection", (socket) => {
         return;
       }
 
+      // set global gameState and only now schedule timer
       gameState = {
         board: generateBoard(wordPool, MIN_WORDS_DEFAULT),
         scores: {},
@@ -781,7 +955,7 @@ io.on("connection", (socket) => {
       };
       const current = Array.from(io.sockets.sockets.keys());
       for (const sId of current) gameState.scores[sId] = gameState.scores[sId] || 0;
-      scheduleEndTimer();
+      scheduleEndTimer(); // <-- agora agendamos apenas quando startGame chamado
       io.emit("gameStarting");
       emitFullState(null, "updateBoard");
 
@@ -790,15 +964,13 @@ io.on("connection", (socket) => {
     }
   });
 
-
-
   // wordSolved (room-aware)
   socket.on("wordSolved", (payload) => {
     try {
       if (!payload || typeof payload !== "object") return;
 
       const roomId = payload.roomId;
-      const word = (payload.word || "").toString().toUpperCase();
+      const word = sanitizeWord(payload.word || "");
       const x = toIntSafe(payload.x);
       const y = toIntSafe(payload.y);
       const dir = (payload.dir || "").toString();

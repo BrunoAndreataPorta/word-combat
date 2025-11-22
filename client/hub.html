@@ -18,14 +18,12 @@
       <div class="user-block" aria-hidden="false">
         <div id="me-name" class="me-name">—</div>
         <button id="btn-profile" class="tiny-btn" type="button">Perfil</button>
-        <button id="btn-logout" class="tiny-btn ghost" type="button">Sair</button>
       </div>
     </header>
 
     <main style="margin-top:14px;">
       <section class="card">
         <div class="create-area">
-          <input id="room-name" class="input" placeholder="Nome da sala (opcional)" />
           <button id="create-room" class="btn">Criar Sala</button>
           <button id="refresh-rooms" class="btn secondary">Atualizar</button>
         </div>
@@ -36,7 +34,7 @@
       </section>
     </main>
   </div>
-
+  <script src="/js/profile.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="js/hub.js"></script>
 </body>

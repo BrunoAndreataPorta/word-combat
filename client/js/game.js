@@ -40,16 +40,18 @@
   let selectedWord = null;  // entry object currently selected (from placedWords)
   let score = 0;
   let timerInterval = null;
-  let overlay = null;
-  let overlayTitle = null;
-  let overlayMessage = null;
-  let overlayButton = null;
+  // final overlay guard
+  let _finalOverlayShown = false;
 
   // ===== UTIL =====
   function normalizeLetter(l) { return (l || "").toUpperCase(); }
   function coordKey(x, y) { return `${x},${y}`; }
   function parseCoord(key) { const [x,y] = key.split(",").map(Number); return { x, y }; }
   function isLockedKey(key) { return !!cellLocks[key]; }
+  function escapeHtml(s) {
+    if (!s) return "";
+    return String(s).replace(/[&<>"'`=\/]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;'})[c]);
+  }
 
   // ===== INIT =====
   function init(options = {}) {
@@ -62,29 +64,14 @@
       wordList = options.wordList;
     }
 
-    if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${score}`;
+    if (scoreDisplay) {
+      // leave inner structure intact: set .value if exists, else fallback
+      const valueEl = scoreDisplay.querySelector(".value");
+      if (valueEl) valueEl.textContent = `${score}`;
+      else scoreDisplay.textContent = `Pontuação: ${score}`;
+    }
 
-    // overlay reutilizável
-    overlay = document.createElement("div");
-    overlay.id = "game-overlay";
-    overlay.style.display = "none";
-    overlay.innerHTML = `
-      <div class="game-card">
-        <h2></h2>
-        <p></p>
-        <div style="margin-top:16px;">
-          <button class="btn">Jogar Novamente</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-    overlayTitle = overlay.querySelector("h2");
-    overlayMessage = overlay.querySelector("p");
-    overlayButton = overlay.querySelector("button");
-    overlayButton.addEventListener("click", () => {
-      hideOverlay();
-      resetGame();
-    });
+    // (no longer create persistent overlay here)
   }
 
   //logica de posicionamento
@@ -405,7 +392,11 @@
       selectedWord.attempted = true;
     }
 
-    if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${score}`;
+    if (scoreDisplay) {
+      const valueEl = scoreDisplay.querySelector(".value");
+      if (valueEl) valueEl.textContent = `${score}`;
+      else scoreDisplay.textContent = `Pontuação: ${score}`;
+    }
 
     checkVictory();
 
@@ -500,7 +491,64 @@
       score += POINTS_WRONG;
       entry.attempted = true;
     }
-    if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${score}`;
+    if (scoreDisplay) {
+      const valueEl = scoreDisplay.querySelector(".value");
+      if (valueEl) valueEl.textContent = `${score}`;
+      else scoreDisplay.textContent = `Pontuação: ${score}`;
+    }
+  }
+
+  // ===== NOVO: renderScoreboard =====
+  // scores: { socketId: points }, players: { socketId: name }
+  function renderScoreboard(scores = {}, players = {}, myId) {
+    if (!scoreDisplay) return;
+
+    // build list of player entries (ensure names present)
+    const seen = new Set();
+    const list = [];
+
+    // prefer keys from scores first (they are the authoritative numeric store)
+    for (const id of Object.keys(scores || {})) {
+      seen.add(id);
+      list.push({
+        id,
+        name: players && players[id] ? players[id] : "(convidado)",
+        score: Number(scores[id] || 0)
+      });
+    }
+    // include any players missing in scores
+    for (const [id, name] of Object.entries(players || {})) {
+      if (seen.has(id)) continue;
+      list.push({ id, name: name || "(convidado)", score: Number((scores && scores[id]) || 0) });
+    }
+
+    // sort desc by score
+    list.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (a.name || "").localeCompare(b.name || "");
+    });
+
+    // my score to show in the main value (fallback to local score if absent)
+    const myScore = (scores && (scores[myId] !== undefined)) ? scores[myId] : score;
+
+    // build HTML: keep existing .label/.value for compatibility with updateScoreDisplay
+    let html = `<span class="label">Placar</span><span class="value">${escapeHtml(String(myScore || 0))}</span>`;
+
+    // lightweight players list (minimal markup, no style changes)
+    html += `<div class="players-list" style="margin-top:8px;">`;
+    for (const p of list) {
+      const isMe = p.id === myId;
+      html += `<div class="player-row" style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:13px;">
+        <div style="display:flex;gap:8px;align-items:center;">
+          ${isMe ? '<strong style="margin-right:6px">(Você)</strong>' : ''}
+          <span class="player-name">${escapeHtml(p.name || p.id)}</span>
+        </div>
+        <div class="player-score" style="font-weight:700;">${escapeHtml(String(p.score))}</div>
+      </div>`;
+    }
+    html += `</div>`;
+
+    scoreDisplay.innerHTML = html;
   }
 
   // dicas
@@ -524,11 +572,11 @@
       <h2>Dicas</h2>
       <strong>Horizontais:</strong>
       <ul id="across-list">
-        ${across.map(c => `<li data-x="${c.entry.x}" data-y="${c.entry.y}" data-dir="H">${c.text}</li>`).join("")}
+        ${across.map(c => `<li data-x="${c.entry.x}" data-y="${c.entry.y}" data-dir="H">${escapeHtml(c.text)}</li>`).join("")}
       </ul>
       <strong>Verticais:</strong>
       <ul id="down-list">
-        ${down.map(c => `<li data-x="${c.entry.x}" data-y="${c.entry.y}" data-dir="V">${c.text}</li>`).join("")}
+        ${down.map(c => `<li data-x="${c.entry.x}" data-y="${c.entry.y}" data-dir="V">${escapeHtml(c.text)}</li>`).join("")}
       </ul>
     `;
 
@@ -565,34 +613,82 @@
     if (li) li.classList.add("completed");
   }
 
+  // final overlay (shared)
+  function _removeFinalOverlayIfExists() {
+    const ex = document.getElementById("final-overlay");
+    if (ex) ex.parentNode.removeChild(ex);
+    _finalOverlayShown = false;
+  }
+
+  function showFinalScreen({ title = "Partida Encerrada", message = "", scoreVal = null, autoRedirect = false, redirectUrl = "/hub.html" } = {}) {
+    if (_finalOverlayShown) return;
+    _finalOverlayShown = true;
+
+    // remove any previous final overlay
+    _removeFinalOverlayIfExists();
+
+    const ov = document.createElement("div");
+    ov.id = "final-overlay";
+    ov.style.position = "fixed";
+    ov.style.inset = "0";
+    ov.style.background = "rgba(0,0,0,0.5)";
+    ov.style.display = "flex";
+    ov.style.alignItems = "center";
+    ov.style.justifyContent = "center";
+    ov.style.zIndex = "5000";
+
+    const card = document.createElement("div");
+    card.className = "game-card";
+    card.style.maxWidth = "420px";
+    card.style.width = "90%";
+    card.style.padding = "18px";
+    card.style.borderRadius = "8px";
+    card.style.textAlign = "center";
+    card.style.background = "#fff";
+
+    const h = document.createElement("h2");
+    h.textContent = title;
+    h.style.marginTop = "0";
+
+    const p = document.createElement("p");
+    p.style.fontWeight = "600";
+    p.style.margin = "8px 0 0 0";
+    p.textContent = message || "";
+
+    if (scoreVal !== null) {
+      const s = document.createElement("p");
+      s.style.margin = "10px 0 0 0";
+      s.style.fontSize = "18px";
+      s.style.fontWeight = "700";
+      s.textContent = `Sua pontuação: ${scoreVal}`;
+      card.appendChild(s);
+    }
+
+    const btnWrap = document.createElement("div");
+    btnWrap.style.marginTop = "16px";
+    const backBtn = document.createElement("button");
+    backBtn.id = "final-back-hub";
+    backBtn.className = "btn";
+    backBtn.textContent = "Voltar ao Hub";
+    backBtn.style.minWidth = "140px";
+
+    btnWrap.appendChild(backBtn);
+
+    card.appendChild(h);
+    card.appendChild(p);
+    card.appendChild(btnWrap);
+    ov.appendChild(card);
+    document.body.appendChild(ov);
+  }
+
   // overylay
   function checkVictory() {
     if (!placedWords || placedWords.length === 0) return;
     const all = placedWords.every(w => w.completed);
-    if (all) showVictoryScreen();
-  }
-
-  function showVictoryScreen() {
-    const ov = document.createElement("div");
-    ov.id = "game-overlay";
-    const card = document.createElement("div");
-    card.className = "game-card";
-    card.innerHTML = `
-      <h2>🎉 Vitória!</h2>
-      <p>Sua pontuação final: ${score}</p>
-      <div style="margin-top:16px;">
-        <button id="play-again" class="btn">Jogar Novamente</button>
-      </div>
-    `;
-    ov.appendChild(card);
-    document.body.appendChild(ov);
-
-    document.getElementById("play-again").addEventListener("click", () => {
-      document.body.removeChild(ov);
-      score = 0;
-      if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${score}`;
-      generateCrossword(MIN_WORDS_DEFAULT);
-    });
+    if (all) {
+      // show final screen (no retry)
+      showFinalScreen({ title: "🎉 Vitória!", message: "Você completou todas as palavras!", scoreVal: score });
+    }
   }
 
   // ===== GENERATION / RESET (modo solo - idêntico ao seu) =====
@@ -640,7 +736,11 @@
 
   function resetGame() {
     score = 0;
-    if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${score}`;
+    if (scoreDisplay) {
+      const valueEl = scoreDisplay.querySelector(".value");
+      if (valueEl) valueEl.textContent = `${score}`;
+      else scoreDisplay.textContent = `Pontuação: ${score}`;
+    }
     generateCrossword(MIN_WORDS_DEFAULT);
   }
 
@@ -660,7 +760,8 @@
       timerDisplay.textContent = formatTime(timeLeft);
       if (timeLeft <= 0) {
         stopTimer();
-        showGameOver();
+        // show final screen with score instead of offering "jogar novamente"
+        showFinalScreen({ title: "⏱️ Tempo Esgotado!", message: "Partida encerrada pelo tempo.", scoreVal: score });
       }
     }, 1000);
   }
@@ -676,29 +777,6 @@
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     return `${m.toString().padStart(2,"0")}:${s.toString().padStart(2,"0")}`;
-  }
-
-  function showGameOver() {
-    const overlayEl = document.createElement("div");
-    overlayEl.id = "game-overlay";
-    const card = document.createElement("div");
-    card.className = "game-card";
-    card.innerHTML = `
-      <h2>⏱️ Tempo Esgotado!</h2>
-      <p>Sua pontuação final: ${score}</p>
-      <div style="margin-top:16px;">
-        <button id="play-again" class="btn">Jogar Novamente</button>
-      </div>
-    `;
-    overlayEl.appendChild(card);
-    document.body.appendChild(overlayEl);
-
-    document.getElementById("play-again").addEventListener("click", () => {
-      document.body.removeChild(overlayEl);
-      score = 0;
-      if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${score}`;
-      generateCrossword(MIN_WORDS_DEFAULT);
-    });
   }
 
   // ===== SERVER -> CLIENT: montar o board vindo do servidor =====
@@ -750,7 +828,11 @@
     },
     resetScore: () => {
       score = 0;
-      if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${score}`;
+      if (scoreDisplay) {
+        const valueEl = scoreDisplay.querySelector(".value");
+        if (valueEl) valueEl.textContent = `${score}`;
+        else scoreDisplay.textContent = `Pontuação: ${score}`;
+      }
     },
     getState: () => ({
       grid,
@@ -759,12 +841,19 @@
       cellLocks
     }),
     updateScoreDisplay: (val) => {
-      if (scoreDisplay) scoreDisplay.textContent = `Pontuação: ${val}`;
+      if (scoreDisplay) {
+        const valueEl = scoreDisplay.querySelector(".value");
+        if (valueEl) valueEl.textContent = `${val}`;
+        else scoreDisplay.textContent = `Pontuação: ${val}`;
+      }
     },
+    // <-- export renderScoreboard para main.js chamar
+    renderScoreboard,
     markWordCellsFromServer, // <- usada para aplicar palavras acertadas por outro jogador
     startTimer,
     stopTimer,
+    showFinalScreen, // <- expose final screen API
     GRID_SIZE,
     myId: null // <- será preenchido em main.js (socket.on("connect"))
   };
-  })();
+})();

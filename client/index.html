@@ -13,8 +13,7 @@
 
     <div class="user-area" aria-hidden="false">
       <div id="me-name-top" class="me-name">—</div>
-      <button id="btn-profile" class="tiny-btn" type="button">Perfil</button>
-      <button id="btn-logout" class="tiny-btn" type="button">Sair</button>
+      <button id="btn-leave" class="tiny-btn" type="button">SAIR</button>
     </div>
   </header>
 
@@ -34,19 +33,7 @@
     </section>
   </main>
 
-  <!-- profile modal -->
-  <div id="profile-modal" class="profile-modal" role="dialog" aria-modal="true" aria-hidden="true">
-    <div class="profile-card" role="document">
-      <h3 style="margin-top:0">Perfil</h3>
-      <div style="margin-bottom:8px"><strong>Nome:</strong> <span id="profile-name">—</span></div>
-      <div style="margin-bottom:8px"><strong>Email:</strong> <span id="profile-email">—</span></div>
-      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">
-        <button id="profile-close" class="btn secondary">Fechar</button>
-        <button id="profile-logout" class="btn">Sair</button>
-      </div>
-    </div>
-  </div>
-
+  <script src="/js/leave.js"></script>
   <script src="js/game.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="js/main.js"></script>
