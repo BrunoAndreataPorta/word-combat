@@ -8,7 +8,7 @@
   const POINTS_CORRECT = 10;
   const POINTS_WRONG = -5;
 
-  // DOM refs (setados em init)
+  // Referências DOM (definidas em init)
   let container = null;
   let cluesContainer = null;
   let scoreDisplay = null;
@@ -32,49 +32,56 @@
     { word: "ceu", hint: "Fica acima de nós" }
   ];
 
-  let grid = {};            // map "x,y" -> letter (UPPERCASE)
-  let placedWords = [];     // array { word (UPPER), x, y, dir, hint, completed, attempted }
-  let cellWords = {};       // map "x,y" -> [ { entry, index } ... ]
-  let cellLocks = {};       // map "x,y" -> true  (celulas já completadas e travadas)
-  let cellRefs = {};        // map "x,y" -> input element
-  let selectedWord = null;  // entry object currently selected (from placedWords)
+  // Estado do tabuleiro e mapeamentos
+  let grid = {};            // mapa "x,y" -> letra (MAIÚSCULA)
+  let placedWords = [];     // array de entradas: { word (UPPER), x, y, dir, hint, completed, attempted }
+  let cellWords = {};       // mapa "x,y" -> [ { entry, index } ... ] (quais palavras passam por cada célula)
+  let cellLocks = {};       // mapa "x,y" -> true  (células já confirmadas/travadas)
+  let cellRefs = {};        // mapa "x,y" -> elemento input correspondente
+  let selectedWord = null;  // entrada atualmente selecionada (referência em placedWords)
   let score = 0;
   let timerInterval = null;
-  // final overlay guard
+  // flag para garantir que o overlay final só apareça uma vez
   let _finalOverlayShown = false;
 
-  // ===== UTIL =====
+  // Estado remoto conhecido (se houver) — usado para decidir vencedor quando o tempo zerar
+  let lastRemoteScores = null;   // { socketId: pontos }
+  let lastRemotePlayers = null;  // { socketId: nome }
+
+  // ===== UTILITÁRIOS =====
   function normalizeLetter(l) { return (l || "").toUpperCase(); }
   function coordKey(x, y) { return `${x},${y}`; }
   function parseCoord(key) { const [x,y] = key.split(",").map(Number); return { x, y }; }
   function isLockedKey(key) { return !!cellLocks[key]; }
   function escapeHtml(s) {
     if (!s) return "";
-    return String(s).replace(/[&<>"'`=\/]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;'})[c]);
+    return String(s).replace(/[&<>\"'`=\/]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;'})[c]);
   }
 
-  // ===== INIT =====
+  // ===== INICIALIZAÇÃO =====
   function init(options = {}) {
     container = document.getElementById("grid-container");
     cluesContainer = document.getElementById("clues");
     scoreDisplay = document.getElementById("score");
     timerDisplay = document.getElementById("timer");
 
+    // se foi passada uma lista customizada de palavras, usa-a
     if (options.wordList && Array.isArray(options.wordList) && options.wordList.length) {
       wordList = options.wordList;
     }
 
+    // atualiza exibição inicial de pontuação (mantendo estrutura existente se houver)
     if (scoreDisplay) {
-      // leave inner structure intact: set .value if exists, else fallback
       const valueEl = scoreDisplay.querySelector(".value");
       if (valueEl) valueEl.textContent = `${score}`;
       else scoreDisplay.textContent = `Pontuação: ${score}`;
     }
 
-    // (no longer create persistent overlay here)
+    // (não criamos overlay persistente aqui)
   }
 
-  //logica de posicionamento
+  // ===== POSICIONAMENTO DE PALAVRAS =====
+  // escreve a palavra no mapa grid e registra em placedWords
   function placeWordAt(word, x, y, dir, hint) {
     for (let i = 0; i < word.length; i++) {
       const key = dir === "H" ? coordKey(x + i, y) : coordKey(x, y + i);
@@ -83,12 +90,14 @@
     placedWords.push({ word, x, y, dir, hint, completed: false, attempted: false });
   }
 
+  // coloca a primeira palavra centralizada horizontalmente
   function placeFirstWord(word, hint) {
     const startX = Math.floor((GRID_SIZE - word.length) / 2);
     const startY = Math.floor(GRID_SIZE / 2);
     placeWordAt(word, startX, startY, "H", hint);
   }
 
+  // verifica se uma palavra cabe no grid sem conflitos
   function canPlace(word, x, y, dir) {
     if (dir === "H" && (x < 0 || x + word.length > GRID_SIZE)) return false;
     if (dir === "V" && (y < 0 || y + word.length > GRID_SIZE)) return false;
@@ -99,8 +108,10 @@
       const key = coordKey(xi, yi);
       const cur = grid[key];
 
+      // se existe letra diferente, não pode
       if (cur && cur !== word[i]) return false;
 
+      // se célula vazia, checa vizinhança para evitar junções ilegais
       if (!cur) {
         const neighbors = dir === "H"
           ? [[xi, yi - 1], [xi, yi + 1]]
@@ -112,6 +123,7 @@
       }
     }
 
+    // evita letras imediatamente antes e depois da palavra
     const beforeKey = dir === "H" ? coordKey(x - 1, y) : coordKey(x, y - 1);
     const afterKey = dir === "H" ? coordKey(x + word.length, y) : coordKey(x, y + word.length);
     if (grid[beforeKey] || grid[afterKey]) return false;
@@ -119,6 +131,7 @@
     return true;
   }
 
+  // tenta posicionar entry cruzando com palavras já colocadas
   function findCrossPlacement(entry) {
     for (const existing of placedWords) {
       for (let i = 0; i < existing.word.length; i++) {
@@ -145,7 +158,8 @@
     return false;
   }
 
-  // mapping
+  // ===== MAPEAMENTO NUMÉRICO E DE CÉLULAS =====
+  // constrói mapa de números (número da dica) para células iniciais das palavras
   function buildNumberMap() {
     const map = {};
     let num = 1;
@@ -156,6 +170,7 @@
     return map;
   }
 
+  // constrói cellWords: para cada célula, lista quais palavras e índices passam por ela
   function buildCellWordMap() {
     cellWords = {};
     for (const entry of placedWords) {
@@ -169,14 +184,14 @@
     }
   }
 
-  // renderizar o tabuleiro
+  // ===== RENDERIZAÇÃO DO TABULEIRO =====
   function renderGrid() {
     if (!container) {
       console.warn("Grid container não inicializado. Chame game.init() primeiro.");
       return;
     }
 
-    // limpar referências anteriores
+    // limpa referências anteriores
     cellRefs = {};
     container.style.gridTemplateColumns = `repeat(${GRID_SIZE}, ${CELL_SIZE}px)`;
     container.innerHTML = "";
@@ -212,7 +227,7 @@
           input.disabled = true;
         }
 
-        // listeners
+        // ouvintes de evento para cada célula
         input.addEventListener("input", (e) => handleInput(e, input));
         input.addEventListener("keydown", (e) => handleKeyDown(e, input));
         input.addEventListener("click", () => handleCellClick(key));
@@ -235,10 +250,11 @@
     renderClues(numberMap);
   }
 
-  // input handlers
+  // ===== MANIPULADORES DE INPUT =====
   function handleInput(e, input) {
     const key = input.dataset.coord;
     if (isLockedKey(key)) {
+      // célula confirmada/travada por outro jogador ou por nós — impede edição
       input.value = input.dataset.letter || "";
       return;
     }
@@ -250,6 +266,7 @@
     }
     e.target.value = v;
 
+    // marca as palavras que passam por essa célula como não-attempted (nova tentativa)
     if (cellWords[key]) {
       for (const { entry } of cellWords[key]) {
         entry.attempted = false;
@@ -273,6 +290,7 @@
           if (input.value) {
             input.value = "";
           } else {
+            // move para trás até encontrar célula editável
             for (let j = i - 1; j >= 0; j--) {
               const px = selectedWord.dir === "H" ? selectedWord.x + j : selectedWord.x;
               const py = selectedWord.dir === "H" ? selectedWord.y : selectedWord.y + j;
@@ -308,11 +326,13 @@
     }
   }
 
-  // selecionar e navegar
+  // ===== SELEÇÃO E NAVEGAÇÃO =====
   function selectWord(entry) {
+    // remove destaque de todas as células
     Object.values(cellRefs).forEach(el => el.classList.remove("highlighted"));
     selectedWord = entry;
 
+    // adiciona classe highlighted nas células da palavra selecionada
     for (let i = 0; i < entry.word.length; i++) {
       const x = entry.dir === "H" ? entry.x + i : entry.x;
       const y = entry.dir === "H" ? entry.y : entry.y + i;
@@ -323,6 +343,7 @@
 
     updateCluesHighlight(entry);
 
+    // foca na primeira célula vazia da palavra
     for (let i = 0; i < entry.word.length; i++) {
       const x = entry.dir === "H" ? entry.x + i : entry.x;
       const y = entry.dir === "H" ? entry.y : entry.y + i;
@@ -337,7 +358,7 @@
     const { x: cx, y: cy } = parseCoord(currentInput.dataset.coord);
     let startIndex = 0;
 
-    // encontra o índice atual corretamente
+    // encontra o índice atual na palavra selecionada
     for (let i = 0; i < selectedWord.word.length; i++) {
       const x = selectedWord.dir === "H" ? selectedWord.x + i : selectedWord.x;
       const y = selectedWord.dir === "H" ? selectedWord.y : selectedWord.y + i;
@@ -347,7 +368,7 @@
       }
     }
 
-    // move para o próximo índice livre (considerando direção)
+    // avança para o próximo índice livre considerando direção
     for (let i = startIndex; i < selectedWord.word.length; i++) {
       const x = selectedWord.dir === "H" ? selectedWord.x + i : selectedWord.x;
       const y = selectedWord.dir === "H" ? selectedWord.y : selectedWord.y + i;
@@ -362,7 +383,8 @@
   }
 
 
-  // Retorna resultado para que o main.js possa emitir ao servidor se quiser
+  // ===== VALIDAÇÃO E MARCAÇÃO DE PALAVRAS =====
+  // retorna resultado para que o main.js possa emitir ao servidor se desejar
   function checkSelectedWord() {
     if (!selectedWord) return null;
 
@@ -381,13 +403,15 @@
 
     markWordCells(selectedWord, correct);
 
-    // atualiza score local
+    // atualiza pontuação local (modo solo / fallback)
     if (correct && !selectedWord.completed) {
       score += POINTS_CORRECT;
       selectedWord.completed = true;
       selectedWord.attempted = true;
       markClueAsComplete(selectedWord);
     } else if (!correct && !selectedWord.completed && !selectedWord.attempted) {
+      // Em ambientes multiplayer pode ser desejável que o servidor aplique essa penalidade.
+      // Se estiver usando servidor autoritativo, evite aplicar no cliente e envie apenas um evento.
       score += POINTS_WRONG;
       selectedWord.attempted = true;
     }
@@ -408,8 +432,8 @@
     };
   }
 
-  // marca células sem alterar as que já estão travadas
-  // entryPassed pode ser um objeto vindo do servidor (com completedBy) ou uma referência local
+  // marca as células de uma palavra como corretas/incorretas sem sobrescrever células já travadas
+  // entryPassed pode ser um objeto vindo do servidor (com completedBy) ou referência local
   function markWordCells(entryPassed, correct) {
     // tenta casar com placedWords para manter referência local consistente
     let entry = null;
@@ -417,11 +441,11 @@
       entry = placedWords.find(e => e.x === entryPassed.x && e.y === entryPassed.y && e.dir === entryPassed.dir && e.word.toUpperCase() === (entryPassed.word || "").toString().toUpperCase());
     }
     if (!entry) {
-      // se não encontrou, pode ser que passed seja exatamente a referência já (ou word only)
+      // se não encontrou, pode ser que passed seja exatamente a referência já (ou apenas a word)
       entry = entryPassed;
     }
 
-    // marca cada célula
+    // marca cada célula da palavra
     for (let i = 0; i < entry.word.length; i++) {
       const x = entry.dir === "H" ? entry.x + i : entry.x;
       const y = entry.dir === "H" ? entry.y : entry.y + i;
@@ -429,10 +453,10 @@
       const el = cellRefs[k];
       if (!el) continue;
 
-      // se a célula já está confirmada por outra palavra, não altere-a
+      // se a célula já estiver confirmada por outra palavra, não altere-a
       if (isLockedKey(k)) continue;
 
-      el.classList.remove("correct", "wrong");
+      el.classList.remove("correct", "wrong", "correct-other");
 
       if (correct) {
         el.classList.add("correct");
@@ -442,16 +466,21 @@
       } else {
         el.classList.add("wrong");
         el.disabled = false;
+        // só desbloqueia explicitamente se não estiver travada por ninguém
         cellLocks[k] = false;
       }
     }
 
     // se veio do servidor com completedBy, atualize o placedWords correspondente
     if (entryPassed && entryPassed.completedBy) {
-      if (entry) entry.completed = true;
+      if (entry) {
+        entry.completed = true;
+        entry.completedBy = entryPassed.completedBy;
+      }
     }
   }
 
+  // aplica marcação no DOM quando palavra veio do servidor (outro jogador)
   function markWordCellsFromServer(srvWord) {
     for (let i = 0; i < srvWord.word.length; i++) {
       const x = srvWord.dir === "H" ? srvWord.x + i : srvWord.x;
@@ -460,13 +489,20 @@
       const input = document.querySelector(`input[data-coord="${key}"]`);
       if (!input) continue;
 
+      // escreve a letra correta e trava a célula visualmente
       input.value = srvWord.word[i].toUpperCase();
+      input.dataset.letter = srvWord.word[i].toUpperCase();
       input.disabled = true;
+      // garante que classes de erro não permaneçam
+      input.classList.remove("wrong", "correct");
       if (srvWord.completedBy && srvWord.completedBy !== window.game.myId) {
-        input.classList.add("correct-other"); // diferente se for o outro jogador
+        input.classList.add("correct-other"); // estilo diferente se for de outro jogador
       } else {
         input.classList.add("correct");
       }
+
+      // marca a célula como travada para prevenir futuras edições por este cliente
+      cellLocks[key] = true;
     }
 
     const entry = placedWords.find(w =>
@@ -498,16 +534,16 @@
     }
   }
 
-  // ===== NOVO: renderScoreboard =====
-  // scores: { socketId: points }, players: { socketId: name }
+  // ===== PLACAR: renderização do placar com múltiplos jogadores =====
+  // scores: { socketId: pontos }, players: { socketId: nome }
   function renderScoreboard(scores = {}, players = {}, myId) {
     if (!scoreDisplay) return;
 
-    // build list of player entries (ensure names present)
+    // constrói lista de jogadores a partir dos scores e players
     const seen = new Set();
     const list = [];
 
-    // prefer keys from scores first (they are the authoritative numeric store)
+    // prioriza chaves de scores como fonte autoritativa de pontuação
     for (const id of Object.keys(scores || {})) {
       seen.add(id);
       list.push({
@@ -516,25 +552,25 @@
         score: Number(scores[id] || 0)
       });
     }
-    // include any players missing in scores
+    // adiciona jogadores que estiverem no players, mas não nos scores
     for (const [id, name] of Object.entries(players || {})) {
       if (seen.has(id)) continue;
       list.push({ id, name: name || "(convidado)", score: Number((scores && scores[id]) || 0) });
     }
 
-    // sort desc by score
+    // ordena decrescente por pontuação
     list.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
       return (a.name || "").localeCompare(b.name || "");
     });
 
-    // my score to show in the main value (fallback to local score if absent)
+    // minha pontuação principal para exibir no destaque (usa scoreboard remoto se disponível)
     const myScore = (scores && (scores[myId] !== undefined)) ? scores[myId] : score;
 
-    // build HTML: keep existing .label/.value for compatibility with updateScoreDisplay
+    // monta HTML mantendo .label/.value para compatibilidade
     let html = `<span class="label">Placar</span><span class="value">${escapeHtml(String(myScore || 0))}</span>`;
 
-    // lightweight players list (minimal markup, no style changes)
+    // lista leve de jogadores
     html += `<div class="players-list" style="margin-top:8px;">`;
     for (const p of list) {
       const isMe = p.id === myId;
@@ -551,7 +587,7 @@
     scoreDisplay.innerHTML = html;
   }
 
-  // dicas
+  // ===== DICAS (clues) =====
   function renderClues(numberMap) {
     if (!cluesContainer) return;
     const across = [];
@@ -613,7 +649,7 @@
     if (li) li.classList.add("completed");
   }
 
-  // final overlay (shared)
+  // ===== OVERLAY FINAL (tela de fim de partida) =====
   function _removeFinalOverlayIfExists() {
     const ex = document.getElementById("final-overlay");
     if (ex) ex.parentNode.removeChild(ex);
@@ -624,7 +660,7 @@
     if (_finalOverlayShown) return;
     _finalOverlayShown = true;
 
-    // remove any previous final overlay
+    // remove overlay anterior se houver
     _removeFinalOverlayIfExists();
 
     const ov = document.createElement("div");
@@ -681,17 +717,17 @@
     document.body.appendChild(ov);
   }
 
-  // overylay
+  // checa vitória (todas palavras completadas)
   function checkVictory() {
     if (!placedWords || placedWords.length === 0) return;
     const all = placedWords.every(w => w.completed);
     if (all) {
-      // show final screen (no retry)
+      // mostra tela final sem oferecer retry
       showFinalScreen({ title: "🎉 Vitória!", message: "Você completou todas as palavras!", scoreVal: score });
     }
   }
 
-  // ===== GENERATION / RESET (modo solo - idêntico ao seu) =====
+  // ===== GERAÇÃO / RESET (modo solo) =====
   function generateCrossword(minWords = MIN_WORDS_DEFAULT) {
     let attempts = 0;
     let success = false;
@@ -760,11 +796,48 @@
       timerDisplay.textContent = formatTime(timeLeft);
       if (timeLeft <= 0) {
         stopTimer();
-        // show final screen with score instead of offering "jogar novamente"
-        showFinalScreen({ title: "⏱️ Tempo Esgotado!", message: "Partida encerrada pelo tempo.", scoreVal: score });
+
+        // se tivermos um scoreboard remoto conhecido, determina vencedor(es)
+        if (lastRemoteScores && Object.keys(lastRemoteScores).length > 0) {
+          // converte entries e encontra maior pontuação
+          const entries = Object.entries(lastRemoteScores);
+          let bestScore = -Infinity;
+          for (const [, pts] of entries) {
+            const n = Number(pts) || 0;
+            if (n > bestScore) bestScore = n;
+          }
+
+          // pega todos os ids que empataram na melhor pontuação
+          const winners = entries
+            .filter(([, pts]) => (Number(pts) || 0) === bestScore)
+            .map(([id]) => id);
+
+          // resolve nomes (fallback para slice do id)
+          const winnerNames = winners.map(id => (lastRemotePlayers && lastRemotePlayers[id]) ? lastRemotePlayers[id] : (id ? id.slice(0,6) : "—"));
+
+          // monta label amigável (se houver empate, mostra todos)
+          let winnerLabel;
+          if (winnerNames.length === 1) {
+            winnerLabel = `${winnerNames[0]} — ${bestScore} pontos`;
+          } else {
+            winnerLabel = `${winnerNames.join(", ")} — ${bestScore} pontos (empate)`;
+          }
+
+          const myScore = (lastRemoteScores && window.game && window.game.myId) ? (lastRemoteScores[window.game.myId] || score) : score;
+
+          showFinalScreen({
+            title: "⏱️ Tempo Esgotado!",
+            message: `Vencedor: ${winnerLabel}`,
+            scoreVal: myScore
+          });
+        } else {
+          // fallback: mensagem genérica quando não temos scoreboard remoto
+          showFinalScreen({ title: "⏱️ Tempo Esgotado!", message: "Partida encerrada pelo tempo.", scoreVal: score });
+        }
       }
     }, 1000);
   }
+
 
   function stopTimer() {
     if (timerInterval) {
@@ -779,12 +852,12 @@
     return `${m.toString().padStart(2,"0")}:${s.toString().padStart(2,"0")}`;
   }
 
-  // ===== SERVER -> CLIENT: montar o board vindo do servidor =====
+  // ===== MONTAR O BOARD VINDO DO SERVIDOR =====
   // words: array de { word, x, y, dir, hint? || clue?, completedBy? }
   function generateCrosswordFromServer(words) {
     resetBoardState();
 
-    // normaliza e popula grid/placedWords (guardamos word em UPPERCASE)
+    // normaliza e popula grid/placedWords (guardamos word em MAIÚSCULAS)
     words.forEach(entry => {
       const hint = entry.hint || entry.clue || "";
       const wordUp = (entry.word || "").toString().toUpperCase();
@@ -814,7 +887,7 @@
     });
   }
 
-  // ===== API =====
+  // ===== API PÚBLICA =====
   window.game = {
     init,
     generateCrossword,            // modo solo
@@ -852,7 +925,11 @@
     markWordCellsFromServer, // <- usada para aplicar palavras acertadas por outro jogador
     startTimer,
     stopTimer,
-    showFinalScreen, // <- expose final screen API
+    showFinalScreen, // <- expõe API para exibir tela final
+    setRemoteState: (scores, players) => { // <- importante: main.js deve chamar isso ao receber updateBoard/initState
+      lastRemoteScores = scores || null;
+      lastRemotePlayers = players || null;
+    },
     GRID_SIZE,
     myId: null // <- será preenchido em main.js (socket.on("connect"))
   };

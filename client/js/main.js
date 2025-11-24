@@ -1,15 +1,18 @@
+// main.js — controla a interação cliente <-> servidor durante a partida
 document.addEventListener("DOMContentLoaded", () => {
+  // verifica se o módulo de jogo (window.game) foi carregado
   if (!window.game) {
     console.error("window.game não encontrado — verifique se game.js foi carregado antes do main.js");
     return;
   }
+  // inicializa referências/DOM do jogo
   window.game.init();
 
   // pega room da query se existir (para partidas em sala)
   const urlParams = new URLSearchParams(window.location.search);
   const roomIdFromUrl = urlParams.get("room");
 
-  // conectar sem auth explícito (servidor lê cookie httpOnly com JWT)
+  // conecta socket.io (o servidor usa cookie httpOnly p/ auth)
   const socket = io();
   console.log("Socket tentando conectar...");
 
@@ -17,13 +20,13 @@ document.addEventListener("DOMContentLoaded", () => {
     console.log("Socket conectado:", socket.id);
     if (window.game) window.game.myId = socket.id;
 
-    // se abrimos esta página com ?room=ID, mande joinRoom automaticamente
+    // se abrimos esta página com ?room=ID, tenta entrar automaticamente na sala
     if (roomIdFromUrl) {
       console.log("Solicitando joinRoom automático para:", roomIdFromUrl);
       socket.emit("joinRoom", { roomId: roomIdFromUrl });
     }
 
-    // preencher nome do usuário no topo (se /api/me retornar algo)
+    // preenche o nome do usuário no topo, se /api/me responder
     (async () => {
       try {
         const res = await fetch("/api/me");
@@ -32,12 +35,12 @@ document.addEventListener("DOMContentLoaded", () => {
           const el = document.getElementById("me-name-top");
           if (el) el.textContent = me.name || "—";
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) { /* ignorar falhas de fetch */ }
     })();
   });
   socket.on("connect_error", (err) => console.error("Erro de conexão socket:", err));
 
-  // fallback local caso init não chegue
+  // fallback local caso initState demore demais a chegar
   let initArrived = false;
   const FALLBACK_MS = 1200;
   const fallbackTimer = setTimeout(() => {
@@ -47,17 +50,20 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }, FALLBACK_MS);
 
+  // inicia o timer do cliente de acordo com endTime vindo do servidor
   function startTimerFromServer(endTime) {
     if (!endTime) return;
     const now = Date.now();
     let secondsLeft = Math.ceil((endTime - now) / 1000);
     if (secondsLeft < 0) secondsLeft = 0;
 
+    // se o próprio módulo game tem startTimer, delega a responsabilidade
     if (typeof window.game.startTimer === "function") {
       window.game.startTimer(secondsLeft);
       return;
     }
 
+    // fallback: manipula elemento #timer diretamente
     const timerEl = document.getElementById("timer");
     if (!timerEl) return;
     if (window._mainTimerInterval) clearInterval(window._mainTimerInterval);
@@ -76,6 +82,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }, 1000);
   }
 
+  // overlay local para mostrar enquanto servidor gera o tabuleiro
   let serverGenOverlay = null;
   function showServerGenOverlay(msg) {
     if (serverGenOverlay) return;
@@ -100,10 +107,12 @@ document.addEventListener("DOMContentLoaded", () => {
     serverGenOverlay = null;
   }
 
+  // eventos que indicam que o servidor está gerando o board
   socket.on("boardGenerating", (payload) => {
     showServerGenOverlay(payload && payload.message ? payload.message : "ESPERE — O TABULEIRO ESTÁ SENDO GERADO");
   });
 
+  // initState: estado inicial enviado pelo servidor quando o cliente se conecta (ou entra em sala)
   socket.on("initState", (state) => {
     initArrived = true;
     clearTimeout(fallbackTimer);
@@ -111,6 +120,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     console.log("initState recebido (raw):", state);
 
+    // extrai palavras do payload — compatibiliza formatos possíveis
     let words = null;
     if (state) {
       if (state.board && Array.isArray(state.board.words)) words = state.board.words;
@@ -118,6 +128,7 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (Array.isArray(state.board)) words = state.board;
     }
 
+    // se o servidor enviou um board válido, monta-o; senão gera localmente
     if (words && words.length) {
       window.game.generateCrosswordFromServer(words);
     } else {
@@ -125,14 +136,23 @@ document.addEventListener("DOMContentLoaded", () => {
       window.game.generateCrossword(8);
     }
 
+    // se houver tempo restante e estivermos em sala, sincroniza timer
     if (state && state.endTime && roomIdFromUrl) {
       startTimerFromServer(state.endTime);
     }
 
+    // renderiza placar vindo do servidor, se houver
     if (state && state.scores) renderScores(state.scores, state.players || {});
+
+    try {
+      if (window.game && typeof window.game.setRemoteState === "function") {
+        window.game.setRemoteState(state.scores || {}, state.players || {});
+      }
+    } catch (e) { console.warn("setRemoteState falhou:", e); }
   });
 
 
+  // updateBoard: atualizações periódicas do servidor (palavras completadas, scores, fim de jogo)
   socket.on("updateBoard", (state) => {
     hideServerGenOverlay();
 
@@ -145,9 +165,11 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!window.game || !state.board) return;
     const local = window.game.getState();
 
+    // atualiza score do jogador local usando o mapa de scores do servidor
     const myScore = (state.scores && window.game.myId) ? (state.scores[window.game.myId] || 0) : 0;
     window.game.updateScoreDisplay(myScore);
 
+    // aplica mudanças vindas do servidor (marcar células completadas por outros)
     for (const srvWord of state.board.words) {
       const localEntry = local.placedWords.find(
         w => w.x === srvWord.x && w.y === srvWord.y && w.dir === srvWord.dir
@@ -156,12 +178,19 @@ document.addEventListener("DOMContentLoaded", () => {
         window.game.markWordCellsFromServer(srvWord);
       }
     }
+    try {
+      if (window.game && typeof window.game.setRemoteState === "function") {
+        window.game.setRemoteState(state.scores || {}, state.players || {});
+      }
+    } catch (e) { console.warn("setRemoteState falhou:", e); }
   });
 
+  // log quando a partida está prestes a começar
   socket.on("gameStarting", (payload) => {
     console.log("gameStarting recebido:", payload);
   });
 
+  // pequeno som/efeito — beeps para notificar final de jogo
   function playBeep(duration = 0.14, freq = 880, type = 'sine') {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -180,6 +209,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) { console.warn("Audio não disponível:", e); }
   }
 
+  // quando o servidor emite gameEnded, mostra a tela final com vencedor e pontuações
   socket.on("gameEnded", (data) => {
     console.log("gameEnded recebido:", data);
     playBeep(0.14, 880, 'sine');
@@ -202,6 +232,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const myScore = (data && data.scores && window.game && window.game.myId) ? (data.scores[window.game.myId] || 0) : null;
 
+    // usa API do módulo game para exibir tela final (overlay)
     window.game.showFinalScreen({
       title,
       message,
@@ -210,22 +241,24 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
 
+  // utilitário para escapar HTML (prevenir XSS)
   function escapeHtml(s) {
     if (s === null || s === undefined) return "";
     return String(s).replace(/[&<>"'`=\/]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;'})[c]);
   }
 
+  // renderiza o placar lateral com jogadores (apenas usuários autenticados aparecem)
   function renderScores(scores = {}, players = {}) {
     const scoreEl = document.getElementById("score");
     if (!scoreEl) return;
 
     const myId = (window.game && window.game.myId) ? window.game.myId : socket.id;
 
-    // apenas players logados (players[id] truthy)
+    // monta lista apenas com players autenticados (nome truthy)
     const list = [];
 
     Object.entries(players || {}).forEach(([id, name]) => {
-      if (!name) return; // IGNORA convidados 
+      if (!name) return; // ignora convidados
       list.push({
         id,
         name: String(name),
@@ -260,6 +293,7 @@ document.addEventListener("DOMContentLoaded", () => {
     scoreEl.innerHTML = html;
   }
 
+  // listener global para cliques — usado para botão "Voltar ao Hub" dentro do overlay final
   document.addEventListener("click", (ev) => {
     const t = ev.target;
     if (!t) return;
@@ -276,27 +310,34 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  // pressionar Enter checa a palavra selecionada e notifica o servidor:
+  // - em acerto -> wordSolved
+  // - em erro  -> wordAttempt (servidor aplica -5 apenas na primeira tentativa deste jogador pra essa palavra)
   document.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       const result = window.game.checkSelectedWord();
       if (result) {
+        const params = new URLSearchParams(window.location.search);
+        const rid = params.get("room");
+        const payload = {
+          word: result.word,
+          x: result.coords.x,
+          y: result.coords.y,
+          dir: result.coords.dir
+        };
+        if (rid) payload.roomId = rid;
+
         if (result.correct) {
-          const params = new URLSearchParams(window.location.search);
-          const rid = params.get("room");
-          const payload = {
-            word: result.word,
-            x: result.coords.x,
-            y: result.coords.y,
-            dir: result.coords.dir
-          };
-          if (rid) payload.roomId = rid;
           socket.emit("wordSolved", payload);
+        } else {
+          // nova emissão para tentativas incorretas — o servidor aplicará -5 (uma vez por jogador por palavra)
+          socket.emit("wordAttempt", payload);
         }
       }
     }
   });
 
-  // profile + logout
+  // profile + logout (comportamento local do modal de perfil)
   (function wireProfile() {
     const profileBtn = document.getElementById("btn-profile");
     const logoutBtn = document.getElementById("btn-logout");
@@ -323,7 +364,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (profileModal) {
         profileModal.style.display = "flex";
         profileModal.setAttribute("aria-hidden", "false");
-        // desabilita rolagem e interações de fundo
+        // desabilita rolagem e interações do fundo
         document.body.style.overflow = "hidden";
         document.documentElement.classList.add("modal-open");
       }
@@ -332,7 +373,6 @@ document.addEventListener("DOMContentLoaded", () => {
       if (profileModal) {
         profileModal.style.display = "none";
         profileModal.setAttribute("aria-hidden", "true");
-        // restaura rolagem / interações
         document.body.style.overflow = "";
         document.documentElement.classList.remove("modal-open");
       }

@@ -1,3 +1,4 @@
+// carrega variáveis de ambiente do .env e importa dependências
 require('dotenv').config();
 const express = require("express");
 const http = require("http");
@@ -10,24 +11,26 @@ const axios = require("axios");
 const cookieParser = require("cookie-parser");
 const fs = require("fs");
 
+// cria app express e servidor http + socket.io
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+// porta e host configuráveis via ambiente
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 
+// inicializa escuta do servidor (mensagem informativa)
 server.listen(PORT, HOST, () => {
   console.log(`Servidor com Socket.IO rodando em http://${HOST === '0.0.0.0' ? '0.0.0.0' : HOST}:${PORT}`);
   console.log("Acesse pelo navegador de outra máquina: http://<IP_LOCAL_DO_HOST>:"+PORT);
 });
 
-
-// data persistence for default words
+// diretório e arquivo para persistência das palavras padrões
 const DATA_DIR = path.join(__dirname, "..", "data");
 const DEFAULT_WORDS_FILE = path.join(DATA_DIR, "defaultWords.json");
 
-// ===== DB pool (mysql2/promise) =====
+// ===== configuração do pool de conexão com MySQL (mysql2/promise) =====
 const DB_CONFIG = {
   host: process.env.DB_HOST || "localhost",
   user: process.env.DB_USER || "root",
@@ -39,18 +42,18 @@ const DB_CONFIG = {
 };
 const dbPool = mysql.createPool(DB_CONFIG);
 
-// JWT config
+// configuração do JWT (segredo e validade)
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 const JWT_EXPIRES = process.env.JWT_EXPIRES || "7d";
 
-// middleware
+// middleware do express: parse JSON e cookies
 app.use(express.json());
 app.use(cookieParser());
 
-// redirect root to auth page
+// rota raiz redireciona para página de autenticação
 app.get("/", (req, res) => res.redirect("/auth.html"));
 
-// serve client static files
+// entrega arquivos estáticos do cliente
 app.use(express.static(path.join(__dirname, "..", "client")));
 app.get("/hub.html", (req, res) => {
   res.sendFile(path.join(__dirname, "..", "client", "hub.html"));
@@ -59,13 +62,14 @@ app.get("/lobby.html", (req, res) => {
   res.sendFile(path.join(__dirname, "..", "client", "lobby.html"));
 });
 
-// ===== ensure DB + users table exist =====
+// ===== garante que o banco e a tabela users existam (cria se necessário) =====
 async function initDb() {
   const conn = await dbPool.getConnection();
   try {
-    // Create DB if not exists, then ensure using it
+    // cria database se não existir e seleciona
     await conn.query(`CREATE DATABASE IF NOT EXISTS \`${DB_CONFIG.database}\`;`);
     await conn.query(`USE \`${DB_CONFIG.database}\`;`);
+    // cria tabela users com campos essenciais
     await conn.query(`
       CREATE TABLE IF NOT EXISTS users (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -80,12 +84,13 @@ async function initDb() {
     conn.release();
   }
 }
+// inicializa DB e trata erro sem derrubar app
 initDb().catch(err => {
   console.error("DB init error:", err);
-  // do not crash automatically — but log
+  // não encerra o servidor automaticamente — apenas loga o erro
 });
 
-// ===== auth helpers (DB) =====
+// ===== helpers de autenticação (acesso ao DB) =====
 function signToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES });
 }
@@ -98,7 +103,7 @@ async function createUser({ name, email, passwordHash }) {
   return { id: res.insertId, name, email };
 }
 
-// ===== auth endpoints =====
+// ===== endpoints de autenticação =====
 app.post("/api/register", async (req, res) => {
   try {
     const { name, email, password } = req.body || {};
@@ -116,7 +121,6 @@ app.post("/api/register", async (req, res) => {
     const user = await createUser({ name: name.trim().slice(0,150), email: normalizedEmail, passwordHash: hash });
 
     const token = signToken({ id: user.id, name: user.name, email: user.email });
-    // httpOnly cookie
     res.cookie("wc_token", token, { httpOnly: true, sameSite: "lax" });
 
     return res.status(201).json({ id: user.id, name: user.name, email: user.email });
@@ -139,7 +143,7 @@ app.post("/api/login", async (req, res) => {
     if (!ok) return res.status(401).json({ message: "Credenciais inválidas." });
 
     const token = signToken({ id: user.id, name: user.name, email: user.email });
-    res.cookie("wc_token", token, { httpOnly: true, sameSite: "lax" }); // add secure:true in prod with HTTPS
+    res.cookie("wc_token", token, { httpOnly: true, sameSite: "lax" });
 
     return res.status(200).json({ id: user.id, name: user.name, email: user.email });
   } catch (err) {
@@ -168,17 +172,15 @@ app.get("/api/me", async (req, res) => {
   }
 });
 
-// ===== CONFIG / game helpers (your original logic) =====
+// ===== CONFIGURAÇÕES E FUNÇÕES AUXILIARES DO JOGO =====
 const GRID_SIZE = 15;
 const MIN_WORDS_DEFAULT = 8;
 const MAX_GLOBAL_ATTEMPTS = 50;
 const MAX_TRIES_PER_ATTEMPT = 15;
 
-// allow larger generation requests up to 24
 const MAX_GEN_COUNT = 24;
 const DEFAULT_GEN_COUNT = 20;
 
-// default inicial (seu array atual) — agora mutável (let)
 let defaultWordList = [
   { word: "CASA", hint: "Onde moramos" },
   { word: "LUZ", hint: "Ilumina o ambiente" },
@@ -197,13 +199,10 @@ let defaultWordList = [
   { word: "CEU", hint: "Fica acima de nós" }
 ];
 
-// ---- sanitize utility: normalize words (remove accents) ----
 function sanitizeWord(raw) {
   if (!raw) return "";
   let s = String(raw).toUpperCase();
-  // NFD + remove combining diacritics (acentos)
   s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  // keep only A-Z
   s = s.replace(/[^A-Z]/g, "");
   return s.slice(0, 12);
 }
@@ -236,7 +235,6 @@ function persistDefaultWordsToDisk(list) {
   }
 }
 
-// carrega possivel arquivo salvo (se existir) logo ao iniciar
 loadDefaultWordsFromDisk();
 
 const POINTS_CORRECT = 10;
@@ -270,12 +268,14 @@ function canPlaceOnGrid(grid, word, x, y, dir) {
   return true;
 }
 
+// escreve uma palavra no grid e registra em placedWords
+// agora também inicializa attemptedBy: [] para rastrear tentativas incorretas
 function placeWordOnGrid(grid, placedWords, word, x, y, dir, hint) {
   for (let i = 0; i < word.length; i++) {
     const key = dir === "H" ? coordKey(x + i, y) : coordKey(x, y + i);
     grid[key] = word[i];
   }
-  placedWords.push({ word, x, y, dir, hint, completedBy: null });
+  placedWords.push({ word, x, y, dir, hint, completedBy: null, attemptedBy: [] });
 }
 
 function findCrossPlacementOnGrid(grid, placedWords, entry) {
@@ -304,7 +304,6 @@ function findCrossPlacementOnGrid(grid, placedWords, entry) {
   return false;
 }
 
-// Fisher-Yates shuffle (more uniform than .sort)
 function shuffleArray(arr) {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -324,7 +323,6 @@ function generateBoard(wordList = defaultWordList, minWords = MIN_WORDS_DEFAULT)
     attempts++;
     const grid = {};
     const placedWords = [];
-    // use fisher-yates shuffle for better randomness
     const pool = shuffleArray(wordList.map(w => ({ word: sanitizeWord(w.word), hint: w.hint || "" })));
 
     const first = pool.shift();
@@ -350,25 +348,25 @@ function generateBoard(wordList = defaultWordList, minWords = MIN_WORDS_DEFAULT)
     }
   }
 
-  return { words: finalPlaced.map(p => ({ ...p })) };
+  // garantimos que cada word tenha attemptedBy (em caso de versões antigas)
+  return { words: finalPlaced.map(p => ({ ...p, attemptedBy: Array.isArray(p.attemptedBy) ? p.attemptedBy : [] })) };
 }
 
-// ===== game state (global fallback) =====
-// NOTE: endTime starts as null now — timer will start only when startGame is called
+// ===== estado do jogo (fallback global quando não há salas ativas) =====
 let gameState = {
   board: generateBoard(defaultWordList, MIN_WORDS_DEFAULT),
-  scores: {}, // socketId -> points
+  scores: {}, // mapa socketId -> pontos
   endTime: null,
   ended: false
 };
+// garante attemptedBy no board global inicial
+if (gameState.board && Array.isArray(gameState.board.words)) {
+  gameState.board.words.forEach(w => { w.attemptedBy = Array.isArray(w.attemptedBy) ? w.attemptedBy : []; });
+}
 
 let hostId = null;
-
-// mapa socketId -> username (pode ser null para guest)
 const players = {};
-
-// ===== Rooms/Salas =====
-const rooms = {}; // roomId -> { name, hostId, hostName, players: { socketId: username }, gameState?, timer?, _deletionTimeout?, aiOptions? }
+const rooms = {};
 
 function genRoomId() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -391,7 +389,6 @@ function buildRoomListPayload() {
   return out;
 }
 
-// ===== Helpers para remoção agendada de salas (grace period) =====
 function scheduleRoomDeletion(roomId, delayMs = 10000) {
   const room = rooms[roomId];
   if (!room) return;
@@ -421,7 +418,6 @@ function cancelRoomDeletion(roomId) {
   }
 }
 
-// ===== emit full state helper (global) =====
 function emitFullState(targetSocket = null, eventName = null) {
   const payload = {
     board: gameState.board,
@@ -429,7 +425,7 @@ function emitFullState(targetSocket = null, eventName = null) {
     endTime: gameState.endTime,
     hostId,
     ended: gameState.ended,
-    players // global players map
+    players
   };
   if (targetSocket) {
     const ev = eventName || "initState";
@@ -440,12 +436,9 @@ function emitFullState(targetSocket = null, eventName = null) {
   }
 }
 
-// timer (global fallback)
-// scheduleEndTimer now checks for existence of endTime and logs scheduling
 let _endTimerTimeout = null;
 function scheduleEndTimer() {
   if (!gameState.endTime) {
-    // nothing to schedule
     console.log("scheduleEndTimer: endTime não definido — nada agendado.");
     return;
   }
@@ -469,12 +462,10 @@ function finalizeGame() {
   console.log("Tempo do jogo esgotou — finalizando (global).");
   emitFullState(null, "updateBoard");
 }
-// NOTE: não chamar scheduleEndTimer na inicialização — só quando startGame for chamado
 
 function isValidDir(d){ return d === "H" || d === "V"; }
 function toIntSafe(v){ const n = Number(v); return Number.isFinite(n) ? Math.floor(n) : null; }
 
-// ===== socket auth helper (parse cookie header) =====
 function parseCookieHeader(cookieHeader = "") {
   const cookies = {};
   cookieHeader.split(";").forEach(part => {
@@ -486,29 +477,26 @@ function parseCookieHeader(cookieHeader = "") {
   return cookies;
 }
 
-// util: prompt builder
 function buildGenPrompt(count = DEFAULT_GEN_COUNT, theme = null) {
   return `
 Você é um gerador de listas de palavras para um jogo de palavras-cruzadas em português.
 Gere um array JSON com exatamente ${count} objetos em português.
 Formato: [{"word":"PALAVRA","hint":"Dica curta em português"}, ...]
 Regras:
-- Palavra em maiúsculas, apenas letras (A-Z e letras sem acentos em PT-BR). Min 3 e máx 12 caracteres.
+- Palavra em maiúsculas, apenas letras (A-Z e letras sem acentos e sem espaços em PT-BR). Min 3 e máx 12 caracteres.
 - Dica curta (2-8 palavras), sem quebras de linha.
 - Tema: ${theme || 'geral'}
 Responda APENAS com o JSON (sem explicações).
   `.trim();
 }
 
-// ===== GenAI cache to reduce calls =====
-const genCache = new Map(); // key -> { words: [...], ts }
-const GEN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const genCache = new Map();
+const GEN_CACHE_TTL = 5 * 60 * 1000;
 
 async function fetchGeneratedWords(count = DEFAULT_GEN_COUNT, theme = null) {
   const key = process.env.GENAI_API_KEY;
   if (!key) throw new Error("GENAI_API_KEY não definido no servidor.");
 
-  // clamp count defensively
   count = Math.max(4, Math.min(MAX_GEN_COUNT, Number(count) || DEFAULT_GEN_COUNT));
 
   const cacheKey = `c${count}:t${theme || "null"}`;
@@ -518,7 +506,6 @@ async function fetchGeneratedWords(count = DEFAULT_GEN_COUNT, theme = null) {
     return cached.words.slice(0, count);
   }
 
-  // modelos candidatos (ordem de preferência: use the cheaper flash first)
   const modelCandidates = [
     "gemini-2.5-flash",
     "gemini-2.5-pro",
@@ -527,10 +514,9 @@ async function fetchGeneratedWords(count = DEFAULT_GEN_COUNT, theme = null) {
   const prompt = buildGenPrompt(count, theme);
   const bodyContent = { contents: [{ parts: [{ text: prompt }] }] };
 
-  // try flash first; keep attempts minimal to save quota
   const maxAttemptsPerModel = 1;
-  const baseDelay = 300; // ms base para backoff
-  const requestTimeout = 25000; // 25s por tentativa (maior para permitir respostas mais lentas)
+  const baseDelay = 300;
+  const requestTimeout = 25000;
 
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
   function jitter(n){ return n + Math.floor(Math.random() * Math.max(100, n)); }
@@ -568,7 +554,6 @@ async function fetchGeneratedWords(count = DEFAULT_GEN_COUNT, theme = null) {
         const text = extractTextFromResponse(res.data);
         if (!text) throw new Error("Resposta vazia da API GenAI.");
 
-        // tenta parsear JSON puro ou extrair array JSON dentro do texto
         let parsed = null;
         try { parsed = JSON.parse(text); }
         catch (e) {
@@ -594,7 +579,6 @@ async function fetchGeneratedWords(count = DEFAULT_GEN_COUNT, theme = null) {
         console.log(`[GenAI] sucesso com ${modelId} -> ${clean.length} palavras`);
         console.log(`[GenAI] palavras geradas (tema=${theme || 'geral'}): ${clean.map(c => c.word).join(", ")}`);
 
-        // cache result
         genCache.set(cacheKey, { words: clean, ts: Date.now() });
         return clean;
       } catch (err) {
@@ -604,20 +588,18 @@ async function fetchGeneratedWords(count = DEFAULT_GEN_COUNT, theme = null) {
         console.warn(`[GenAI] erro em ${modelId} (attempt ${attempt}) status=${status} msg=${err.message}`);
         if (snippet) console.warn(`[GenAI] response.data (trunc): ${snippet}`);
 
-        // somente retry para códigos retryable
         const retryable = [429, 500, 502, 503, 504].includes(err.response?.status);
         if (!retryable) {
           console.warn(`[GenAI] erro não-retryable em ${modelId}, pulando para o próximo modelo.`);
-          break; // pula para o próximo modelo
+          break;
         }
 
         const delay = jitter(baseDelay * Math.pow(2, attempt - 1));
         console.log(`[GenAI] aguardando ${delay}ms antes da próxima tentativa...`);
         await sleep(delay);
       }
-    } // attempts
-    // if we tried flash and it failed with retryable error, we'll continue to next model
-  } // models
+    }
+  }
 
   console.error("GenAI: todas as tentativas falharam. Último erro:", lastErr?.message || lastErr);
   throw lastErr || new Error("GenAI falhou sem mensagem de erro.");
@@ -629,7 +611,6 @@ app.post("/api/generate-words", async (req, res) => {
 
     try {
       const words = await fetchGeneratedWords(count, theme);
-      // words já é array de { word, hint } (limpos)
       if (Array.isArray(words) && words.length) {
         const clean = words.slice(0, count).map(w => ({
           word: sanitizeWord(w.word),
@@ -637,23 +618,19 @@ app.post("/api/generate-words", async (req, res) => {
         })).filter(x => x.word && x.word.length >= 3);
 
         if (clean.length) {
-          // log também aqui (endpoint)
           console.log(`[api/generate-words] retorno final (tema=${theme || 'geral'}): ${clean.map(c => c.word).join(", ")}`);
 
           if (replaceDefault) {
-            defaultWordList = clean.map(w => ({ word: w.word, hint: w.hint }));
+            defaultWordList = clean.map(w => ({ word: w.word, hint: w.hint || "" }));
             persistDefaultWordsToDisk(defaultWordList);
             console.log("defaultWordList substituída pela GenAI via /api/generate-words (replaceDefault=true).");
           }
           return res.json({ ok: true, words: clean, fallback: false });
         }
       }
-
-      // se chegou aqui, GenAI devolveu algo inválido
       throw new Error("GenAI retornou formato inválido ou vazio.");
     } catch (err) {
       console.warn("GenAI falhou:", err.message || err);
-      // fallback para sua lista local atual (pode ter sido carregada do disco)
       const fallback = (defaultWordList || []).slice(0, count).map(w => ({ word: sanitizeWord(w.word), hint: w.hint || "" }));
       console.log(`[api/generate-words] fallback usado: ${fallback.map(c => c.word).join(", ")}`);
       return res.json({ ok: true, words: fallback, fallback: true });
@@ -665,11 +642,10 @@ app.post("/api/generate-words", async (req, res) => {
   }
 });
 
-// ===== socket.io connection handling (integrated with cookie/JWT auth) =====
+// ===== manipuladores socket.io (integração com cookie/JWT) =====
 io.on("connection", (socket) => {
   console.log("Novo jogador conectado (socket):", socket.id);
 
-  // extract token from handshake cookies
   const header = socket.handshake && socket.handshake.headers && socket.handshake.headers.cookie;
   let username = null;
   if (header) {
@@ -679,9 +655,7 @@ io.on("connection", (socket) => {
       try {
         const payload = jwt.verify(token, JWT_SECRET);
         username = payload.name || null;
-      } catch (e) {
-        // invalid token -> ignore
-      }
+      } catch (e) {}
     }
   }
 
@@ -692,22 +666,17 @@ io.on("connection", (socket) => {
     players[socket.id] = null;
   }
 
-  // assign host if none
   if (!hostId) hostId = socket.id;
   if (!(socket.id in gameState.scores)) gameState.scores[socket.id] = 0;
 
-  // send initState to this client only (global fallback)
   emitFullState(socket, "initState");
   console.log("initState enviado para", socket.id);
 
-  // broadcast rooms and lobby summary
   io.emit("roomList", buildRoomListPayload());
   io.emit("lobbyUpdate", { players, hostId });
 
-  // ---- Rooms handlers ----
-  // createRoom now accepts aiOptions and stores them on the room
+  // criar sala (aceita aiOptions)
   socket.on("createRoom", ({ name, aiOptions } = {}) => {
-    // ensure count limit up to MAX_GEN_COUNT; default to DEFAULT_GEN_COUNT
     const roomCount = aiOptions && aiOptions.count ? Math.max(4, Math.min(MAX_GEN_COUNT, Number(aiOptions.count) || DEFAULT_GEN_COUNT)) : undefined;
     const roomId = genRoomId();
     rooms[roomId] = {
@@ -737,7 +706,6 @@ io.on("connection", (socket) => {
     socket.emit("roomList", buildRoomListPayload());
   });
 
-  // joinRoom supports callback ack
   socket.on("joinRoom", (data = {}, callback) => {
     try {
       const roomId = data && data.roomId;
@@ -758,7 +726,6 @@ io.on("connection", (socket) => {
       socket.join(roomId);
       cancelRoomDeletion(roomId);
 
-      // reconnection: if the username equals hostName, reassign hostId to this socket
       if (room.hostName && players[socket.id] && room.hostName === players[socket.id]) {
         room.hostId = socket.id;
         console.log(`Reatribuído host da sala ${roomId} para socket ${socket.id} (reconexão do host: ${room.hostName})`);
@@ -770,7 +737,7 @@ io.on("connection", (socket) => {
       console.log(`${socket.id} entrou na sala ${roomId} (username: ${players[socket.id] || "guest"})`);
       if (typeof callback === "function") callback({ ok: true, roomId });
       socket.emit("joinRoomResult", { ok: true, roomId });
-      // envia estado da sala diretamente para o socket que entrou (evita ver board global)
+
       if (room.gameState) {
         socket.emit("initState", {
           board: room.gameState.board,
@@ -781,7 +748,6 @@ io.on("connection", (socket) => {
           players: room.players
         });
       } else {
-        // se o jogo ainda não começou na sala, envie um init leve (opcional)
         socket.emit("initState", {
           board: gameState.board,
           scores: gameState.scores,
@@ -823,20 +789,15 @@ io.on("connection", (socket) => {
 
   socket.on("startGame", async ({ roomId, useGen = undefined, count = DEFAULT_GEN_COUNT, theme = null, replaceDefault = undefined } = {}) => {
     try {
-      // limites defensivos, agora até MAX_GEN_COUNT
       count = Math.max(4, Math.min(MAX_GEN_COUNT, Number(count) || DEFAULT_GEN_COUNT));
 
-      // If room-specific AI options exist and the startGame call didn't explicitly override them,
-      // use the room.aiOptions saved at creation time.
       let roomAi = null;
       if (roomId && rooms[roomId] && rooms[roomId].aiOptions) {
         roomAi = rooms[roomId].aiOptions;
       }
 
-      // Determine effective options (priority: explicit args > room.aiOptions > defaults)
       const effectiveUseGen = (typeof useGen === "boolean") ? useGen : (!!roomAi && !!roomAi.useGen);
       const effectiveCount = (typeof count === "number") ? count : (roomAi && roomAi.count) ? roomAi.count : DEFAULT_GEN_COUNT;
-      // explicitly favor explicit theme param; else fallback to roomAi.theme
       const effectiveTheme = (typeof theme === "string" && theme.trim().length) ? theme.trim() : (roomAi && roomAi.theme) ? roomAi.theme : null;
       const effectiveReplaceDefault = (typeof replaceDefault === "boolean") ? replaceDefault : (!!roomAi && !!roomAi.replaceDefault);
 
@@ -846,15 +807,13 @@ io.on("connection", (socket) => {
 
       if (effectiveUseGen && typeof fetchGeneratedWords === "function") {
         try {
-          // notify clients in the room that the board generation is starting
           if (roomId) {
             io.to(roomId).emit("boardGenerating", { message: "ESPERE — O TABULEIRO ESTÁ SENDO GERADO" });
           } else {
             io.emit("boardGenerating", { message: "ESPERE — O TABULEIRO ESTÁ SENDO GERADO" });
           }
 
-          // aumentamos o timeout para 30s para permitir respostas mais lentas da IA
-          const genTimeoutMs = 30000; // 30s
+          const genTimeoutMs = 30000;
           const genStartTs = Date.now();
 
           const generated = await Promise.race([
@@ -912,6 +871,11 @@ io.on("connection", (socket) => {
         const endTime = Date.now() + DEFAULT_TIMER_SECONDS * 1000;
         room.gameState = { board, scores: {}, endTime, ended: false };
 
+        // garante attemptedBy
+        if (room.gameState.board && Array.isArray(room.gameState.board.words)) {
+          room.gameState.board.words.forEach(w => { w.attemptedBy = Array.isArray(w.attemptedBy) ? w.attemptedBy : []; });
+        }
+
         for (const sId of Object.keys(room.players)) room.gameState.scores[sId] = room.gameState.scores[sId] || 0;
 
         if (room.timer) clearTimeout(room.timer);
@@ -940,22 +904,26 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // fallback global
       if (socket.id !== hostId) {
         console.log("startGame global ignorado — não é host:", socket.id);
         return;
       }
 
-      // set global gameState and only now schedule timer
       gameState = {
         board: generateBoard(wordPool, MIN_WORDS_DEFAULT),
         scores: {},
         endTime: Date.now() + DEFAULT_TIMER_SECONDS * 1000,
         ended: false
       };
+
+      // garante attemptedBy para cada palavra do board global
+      if (gameState.board && Array.isArray(gameState.board.words)) {
+        gameState.board.words.forEach(w => { w.attemptedBy = Array.isArray(w.attemptedBy) ? w.attemptedBy : []; });
+      }
+
       const current = Array.from(io.sockets.sockets.keys());
       for (const sId of current) gameState.scores[sId] = gameState.scores[sId] || 0;
-      scheduleEndTimer(); // <-- agora agendamos apenas quando startGame chamado
+      scheduleEndTimer();
       io.emit("gameStarting");
       emitFullState(null, "updateBoard");
 
@@ -964,7 +932,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // wordSolved (room-aware)
+  // marca palavra como resolvida (room-aware)
   socket.on("wordSolved", (payload) => {
     try {
       if (!payload || typeof payload !== "object") return;
@@ -980,7 +948,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // room-specific handling
       if (roomId) {
         const room = rooms[roomId];
         if (!room || !room.gameState) {
@@ -1001,11 +968,9 @@ io.on("connection", (socket) => {
         room.gameState.scores[socket.id] = (room.gameState.scores[socket.id] || 0) + POINTS_CORRECT;
         console.log(`Palavra ${word} resolvida por ${socket.id} na sala ${roomId}. Pontos: ${room.gameState.scores[socket.id]}`);
 
-        // if last word completed -> evaluate winner and broadcast final result (optional improvement)
         const allDone = room.gameState.board.words.every(w => w.completedBy);
         if (allDone) {
           room.gameState.ended = true;
-          // compute winner by score
           const scores = room.gameState.scores;
           let bestId = null, bestScore = -Infinity;
           for (const [sId, pts] of Object.entries(scores)) {
@@ -1025,7 +990,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // fallback: global gameState
       if (gameState.ended || (gameState.endTime && Date.now() > gameState.endTime)) {
         console.log("wordSolved ignorado — jogo global acabado:", socket.id, word);
         return;
@@ -1047,11 +1011,9 @@ io.on("connection", (socket) => {
       gameState.scores[socket.id] = (gameState.scores[socket.id] || 0) + POINTS_CORRECT;
       console.log(`Palavra ${word} resolvida por ${socket.id} (${players[socket.id] || "guest"}). Pontos: ${gameState.scores[socket.id]}`);
 
-      // if last global word done -> finalize
       const allDoneGlobal = gameState.board.words.every(w => w.completedBy);
       if (allDoneGlobal) {
         gameState.ended = true;
-        // compute global winner
         const scores = gameState.scores;
         let bestId = null, bestScore = -Infinity;
         for (const [sId, pts] of Object.entries(scores)) {
@@ -1066,14 +1028,72 @@ io.on("connection", (socket) => {
     }
   });
 
-  // disconnect: limpar players e remover de rooms se necessário (agenda exclusão)
+  // tenta aplicar penalidade por tentativa incorreta (uma vez por jogador por palavra)
+  socket.on("wordAttempt", (payload) => {
+    try {
+      if (!payload || typeof payload !== "object") return;
+      const roomId = payload.roomId;
+      const word = sanitizeWord(payload.word || "");
+      const x = toIntSafe(payload.x);
+      const y = toIntSafe(payload.y);
+      const dir = (payload.dir || "").toString();
+
+      if (!word || x === null || y === null || !isValidDir(dir)) return;
+
+      // sala-scoped
+      if (roomId) {
+        const room = rooms[roomId];
+        if (!room || !room.gameState) return;
+        if (room.gameState.ended || (room.gameState.endTime && Date.now() > room.gameState.endTime)) return;
+
+        const entry = room.gameState.board.words.find(
+          w => w.word === word && w.x === x && w.y === y && w.dir === dir
+        );
+        if (!entry) return;
+        if (entry.completedBy) return;
+
+        entry.attemptedBy = entry.attemptedBy || [];
+        if (!entry.attemptedBy.includes(socket.id)) {
+          entry.attemptedBy.push(socket.id);
+          room.gameState.scores[socket.id] = (room.gameState.scores[socket.id] || 0) + POINTS_WRONG;
+          console.log(`Tentativa incorreta por ${socket.id} na sala ${roomId} para ${word}. Pontos: ${room.gameState.scores[socket.id]}`);
+          io.to(roomId).emit("updateBoard", {
+            board: room.gameState.board,
+            scores: room.gameState.scores,
+            endTime: room.gameState.endTime,
+            hostId: room.hostId,
+            ended: room.gameState.ended,
+            players: room.players
+          });
+        }
+        return;
+      }
+
+      // global fallback
+      if (gameState.ended || (gameState.endTime && Date.now() > gameState.endTime)) return;
+      const entry = gameState.board.words.find(
+        w => w.word === word && w.x === x && w.y === y && w.dir === dir
+      );
+      if (!entry) return;
+      if (entry.completedBy) return;
+
+      entry.attemptedBy = entry.attemptedBy || [];
+      if (!entry.attemptedBy.includes(socket.id)) {
+        entry.attemptedBy.push(socket.id);
+        gameState.scores[socket.id] = (gameState.scores[socket.id] || 0) + POINTS_WRONG;
+        console.log(`Tentativa incorreta por ${socket.id} (global) para ${word}. Pontos: ${gameState.scores[socket.id]}`);
+        emitFullState(null, "updateBoard");
+      }
+    } catch (err) {
+      console.error("Erro ao processar wordAttempt:", err);
+    }
+  });
+
   socket.on("disconnect", () => {
     console.log("Jogador saiu:", socket.id);
 
-    // track rooms that need updateBoard/lobbyUpdate
     const affectedRooms = [];
 
-    // remove from any room
     for (const [rId, room] of Object.entries(rooms)) {
       if (room.players && room.players[socket.id] !== undefined) {
         delete room.players[socket.id];
@@ -1087,18 +1107,15 @@ io.on("connection", (socket) => {
             room.hostName = room.players[room.hostId];
             cancelRoomDeletion(rId);
           } else {
-            // schedule deletion if empty
             scheduleRoomDeletion(rId, 10000);
             io.emit("roomList", buildRoomListPayload());
             continue;
           }
         }
-        // emit lobbyUpdate only to affected room
         io.to(rId).emit("lobbyUpdate", { players: room.players, hostId: room.hostId, roomId: rId });
       }
     }
 
-    // cleanup global
     delete gameState.scores[socket.id];
     delete players[socket.id];
 
@@ -1108,11 +1125,9 @@ io.on("connection", (socket) => {
       console.log("Host saiu — novo hostId:", hostId);
     }
 
-    // atualiza listas globais
     io.emit("roomList", buildRoomListPayload());
     io.emit("lobbyUpdate", { players, hostId });
 
-    // Emit updateBoard only to affected rooms that have a gameState running
     for (const rId of affectedRooms) {
       const room = rooms[rId];
       if (room && room.gameState) {
@@ -1127,7 +1142,6 @@ io.on("connection", (socket) => {
       }
     }
 
-    // If there are connected sockets outside any room, send them the global state
     const socketsInRooms = new Set();
     for (const r of Object.values(rooms)) {
       if (r.players) Object.keys(r.players).forEach(sid => socketsInRooms.add(sid));
@@ -1144,7 +1158,7 @@ io.on("connection", (socket) => {
             endTime: gameState.endTime,
             hostId,
             ended: gameState.ended,
-            players // global players map
+            players
           });
         }
       });
@@ -1152,9 +1166,9 @@ io.on("connection", (socket) => {
 
   });
 
-}); // end io.on connection
+}); // fim io.on connection
 
-// start server
+// inicia servidor (segunda chamada; mantém a chamada original do seu código)
 server.listen(PORT, () => {
   console.log(`Servidor com Socket.IO rodando em http://localhost:${PORT}`);
 });

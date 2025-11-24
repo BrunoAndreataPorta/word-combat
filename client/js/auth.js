@@ -1,3 +1,4 @@
+// auth.js — gerencia telas de login/registro e chamadas para a API de autenticação
 document.addEventListener("DOMContentLoaded", () => {
   const loginForm = document.getElementById("login-form");
   const registerForm = document.getElementById("register-form");
@@ -5,20 +6,22 @@ document.addEventListener("DOMContentLoaded", () => {
   const showLoginBtn = document.getElementById("show-login");
   const messages = document.getElementById("messages");
 
-  // Se já estiver autenticado no servidor, /api/me redireciona
+  // Verifica se já existe sessão ativa no servidor.
+  // Se /api/me responder OK, redireciona diretamente ao hub.
   async function checkAuth() {
     try {
       const res = await fetch("/api/me");
       if (res.ok) {
-        // já autenticado -> vai pro hub
+        // já autenticado -> redireciona para o hub
         window.location.href = "/hub.html";
       }
     } catch (e) {
-      // não faz nada
+      // falha na verificação -> não faz nada (permite usar as forms)
     }
   }
   checkAuth();
 
+  // Mostra mensagem de status no formulário (erro, sucesso, info)
   function showMessage(msg, tone = "error") {
     messages.textContent = msg || "";
     if (tone === "error") messages.style.color = "#b94a48";
@@ -27,6 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   function clearMessage() { messages.textContent = ""; }
 
+  // Alterna visibilidade entre formulário de registro e login
   function toggleForms(showRegister) {
     if (showRegister) {
       registerForm.classList.remove("hidden");
@@ -38,13 +42,16 @@ document.addEventListener("DOMContentLoaded", () => {
     clearMessage();
   }
 
+  // liga botões que alternam os formulários
   showRegisterBtn.addEventListener("click", () => toggleForms(true));
   showLoginBtn.addEventListener("click", () => toggleForms(false));
 
+  // utilitário seguro para parse de JSON (evita lançar em resposta inválida)
   async function safeJson(res) {
     try { return await res.json(); } catch { return null; }
   }
 
+  // Chamada para registrar usuário no servidor
   async function doRegister(name, email, password) {
     const btn = document.getElementById("register-btn");
     btn.disabled = true;
@@ -57,6 +64,7 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({ name, email, password })
       });
       const data = await safeJson(res);
+      // guarda nome localmente para possível uso de UI (não é necessário pro cookie httpOnly)
       if (data && data.name) localStorage.setItem("wc_user", data.name);
       if (!res.ok) {
         showMessage(data && data.message ? data.message : `Erro (${res.status})`, "error");
@@ -65,7 +73,7 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
       showMessage("Registrado! Redirecionando...", "success");
-      // O servidor já colocou cookie httpOnly; basta ir para hub
+      // servidor já colocou cookie httpOnly; redireciona ao hub
       setTimeout(() => window.location.href = "/hub.html", 500);
     } catch (err) {
       console.error(err);
@@ -75,6 +83,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // Chamada para efetuar login no servidor
   async function doLogin(email, password) {
     const btn = document.getElementById("login-btn");
     btn.disabled = true;
@@ -87,6 +96,7 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({ email, password })
       });
       const data = await safeJson(res);
+      // guarda nome localmente (opcional)
       if (data && data.name) localStorage.setItem("wc_user", data.name);
       if (!res.ok) {
         showMessage(data && data.message ? data.message : `Erro (${res.status})`, "error");
@@ -104,6 +114,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // submit do formulário de registro
   registerForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearMessage();
@@ -117,6 +128,7 @@ document.addEventListener("DOMContentLoaded", () => {
     await doRegister(name, email, password);
   });
 
+  // submit do formulário de login
   loginForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearMessage();

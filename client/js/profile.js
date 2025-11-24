@@ -1,33 +1,12 @@
-// profile.js — modal de perfil com confirmação que substitui o conteúdo (não aparece abaixo)
-// -----------------------------------------------------------------------------
-// Objetivo:
-//  - Mostrar um modal de "Perfil" quando o botão #btn-profile for clicado.
-//  - Dentro do modal há botão "Sair" que troca o conteúdo por uma confirmação.
-//  - Ao cancelar, o conteúdo original é restaurado e recarregado (/api/me) para
-//    garantir que os campos não fiquem vazios.
-//  - O arquivo exporta window.profileUI.open/close para uso manual se necessário.
-//
-// Observações de design:
-//  - O modal é criado dinamicamente na primeira vez (createModalIfMissing).
-//  - O overlay bloqueia cliques fora do modal e controla acessibilidade (aria-hidden).
-//  - Listeners são adicionados de forma idempotente (marcados com flags como _bound).
-//  - ESC e clique fora fecham o modal (UX comum).
-// -----------------------------------------------------------------------------
-
-
+// profile.js — modal de perfil com confirmação que substitui o conteúdo
 (function () {
   // IDs/seletores usados internamente
   const MODAL_ID = "profile-modal";
   const OVERLAY_ID = "profile-overlay";
   const DEFAULT_ANCHOR_SELECTOR = "#btn-profile";
 
-  /**
-   * Cria o DOM do modal (overlay + card) se não existir e anexa ao body.
-   * Retorna a referência ao modal (elemento card).
-   *
-   * A função mantém um template do conteúdo original em modal._profileContentHtml
-   * para que possamos restaurá-lo após exibir a tela de confirmação.
-   */
+  
+  //Cria o DOM do modal (overlay + card) se não existir e anexa ao body.
   function createModalIfMissing() {
     let existing = document.getElementById(MODAL_ID);
     if (existing) return existing;
@@ -96,12 +75,7 @@
     return modal;
   }
 
-  /**
-   * Busca informações do usuário em /api/me e atualiza os elementos do modal.
-   * Idempotente: pode ser chamada várias vezes, só atualiza os spans se vier ok.
-   *
-   * Também atualiza nomes que possam existir no topo da página (#me-name, #me-name-top).
-   */
+  //Busca informações do usuário em /api/me e atualiza os elementos do modal.
   async function fillUserInfo(modal) {
     if (!modal) return;
     try {
@@ -125,13 +99,6 @@
   // Guarda o elemento que tinha foco antes de abrir o modal, para restaurar depois.
   let lastActiveElement = null;
 
-  /**
-   * Abre o modal:
-   *  - cria o DOM se necessário
-   *  - salva o elemento com foco para restaurar depois
-   *  - desabilita scroll da página (body overflow hidden)
-   *  - preenche as infos via fetch e anexa listeners
-   */
   async function open() {
     const modal = createModalIfMissing();
     const overlay = document.getElementById(OVERLAY_ID);
@@ -158,13 +125,6 @@
     if (closeBtn) closeBtn.focus();
   }
 
-  /**
-   * Fecha o modal:
-   *  - restaura o conteúdo original caso tenha sido trocado
-   *  - esconde overlay e restaura scroll do body
-   *  - restaura foco ao elemento anterior
-   *  - re-atacha listeners e re-popula infos (garante que cancel não deixa campos vazios)
-   */
   function close() {
     const modal = document.getElementById(MODAL_ID);
     const overlay = document.getElementById(OVERLAY_ID);
@@ -190,15 +150,7 @@
     fillUserInfo(modal);
   }
 
-  /**
-   * Substitui o conteúdo do modal por uma vista de confirmação de logout.
-   * Quando o usuário clica "Cancelar" restauramos o conteúdo original e
-   * chamamos fillUserInfo para repopular nome/email (evita que fiquem vazios).
-   *
-   * Observações:
-   *  - Os listeners do confirmar/cancel são adicionados com { once: true }
-   *    para evitar duplicação se a tela for exibida várias vezes.
-   */
+  //Substitui o conteúdo do modal por uma vista de confirmação de logout.
   function showLogoutConfirmation(modal) {
     if (!modal) return;
     const content = modal.querySelector("#profile-content");
@@ -269,17 +221,7 @@
     }
   }
 
-  /**
-   * Anexa comportamentos (listeners) relacionados ao modal:
-   *  - fechar (botão)
-   *  - fechar ao clicar fora (overlay)
-   *  - ESC para fechar
-   *  - botão Sair dentro do conteúdo (mostra confirmação)
-   *
-   * Implementação idempotente:
-   *  - marca os elementos com flags (ex.: _profileBound, _overlayBound) para não
-   *    re-adicionar listeners múltiplas vezes se attachBehavior for chamado novamente.
-   */
+  //Anexa comportamentos (listeners) relacionados ao modal:
   function attachBehavior(modal, overlay) {
     if (!modal || !overlay) return;
 
@@ -327,11 +269,8 @@
     }
   }
 
-  /**
-   * Procura todos os botões que correspondem a DEFAULT_ANCHOR_SELECTOR
-   * e liga o comportamento de abrir o modal. Usa flag _profileAutoBound
-   * para não registrar múltiplos listeners no mesmo botão.
-   */
+  
+  //Procura todos os botões que correspondem a DEFAULT_ANCHOR_SELECTOR
   function autoWire() {
     document.querySelectorAll(DEFAULT_ANCHOR_SELECTOR).forEach(btn => {
       if (!btn._profileAutoBound) {
