@@ -1168,7 +1168,7 @@ io.on("connection", (socket) => {
 
 }); // fim io.on connection
 
-// inicia servidor (segunda chamada; mantém a chamada original do seu código)
+// inicia servidor
 server.listen(PORT, () => {
   console.log(`Servidor com Socket.IO rodando em http://localhost:${PORT}`);
 });
