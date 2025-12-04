@@ -1,6 +1,11 @@
 # 🧩 Word Combat
 
-Projeto final do curso de **Análise e Desenvolvimento de Sistemas** da **FATEC Mogi Mirim - Arthur de Azevedo**.
+Projeto final do curso de **Análise e Desenvolvimento de Sistemas** da **FATEC Mogi Mirim – Arthur de Azevedo**.
+
+
+Word Combat é um jogo multiplayer de palavras-cruzadas competitivo, onde os jogadores disputam para completar o tabuleiro antes do tempo acabar. O jogo utiliza IA generativa (Google Gemini) para criar palavras e dicas exclusivas, tornando cada partida única.
+
+
 
 ---
 
@@ -10,8 +15,9 @@ Projeto final do curso de **Análise e Desenvolvimento de Sistemas** da **FATEC 
 ```
 word-combat/
 ├── .gitignore
-├── READEME.MD
+├── README.md
 ├── server/
+│   ├── .env
 │   ├── index.js
 │   ├── package.json
 │   └── package-lock.json
@@ -24,8 +30,10 @@ word-combat/
         ├── auth.js
         └── game.js
         └── hub.js
+        └── leave.js
         └── lobby.js
         └── main.js
+        └── profile.js
     └── css/
         ├── auth.css
         └── hub.css
@@ -76,10 +84,19 @@ Antes de iniciar o servidor, crie um arquivo chamado .env dentro da pasta server
     # API de geração de palavras (Google Gemini)
     GENAI_API_KEY=SUA_CHAVE_AQUI
 
-🧠 Tecnologias utilizadas
-Node.js
-Express
-Socket.io
-HTML5
-CSS
-JavaScript
+🧠 Tecnologias utilizadas  
+**Backend**
+Node.js  
+Express  
+Socket.io  
+MySQL  
+JWT  
+bcryptjs    
+
+**IA**  
+Google Gemini (Geração de palavras e dicas temáticas)  
+  
+**Frontend**  
+HTML5  
+CSS3  
+JavaScript (puro)  
